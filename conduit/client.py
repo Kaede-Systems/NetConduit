@@ -640,6 +640,18 @@ class Client:
         hl = h.lower()
         return hl in ("localhost", "127.0.0.1", "::1") or hl.startswith("127.")
 
+    def _is_private_ip(self, host: str) -> bool:
+        """Check if a host is a private/local IP address."""
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(host)
+            return ip.is_private or ip.is_loopback
+        except ValueError:
+            hl = host.lower()
+            if hl in ("localhost", "localhost.localdomain") or hl.endswith(".local"):
+                return True
+            return False
+
     async def establish_p2p(self, target_client_id: str, timeout: float = 20.0) -> 'Client':
         """
         Establish a direct peer-to-peer connection to another client.
@@ -678,9 +690,10 @@ class Client:
             local_port = self._get_free_port()
             stun_server = self._config.stun_server
             
-            # 4. Perform STUN mapping on local_port
+            # 4. Perform STUN mapping on local_port (skip if local network)
             public_addr = ""
-            if not self._is_loopback(self._config.server_host) and stun_server:
+            is_local = self._is_loopback(self._config.server_host) or self._is_private_ip(self._config.server_host)
+            if not is_local and stun_server:
                 try:
                     public_addr = stun_punch_hole(stun_server, local_port, "")
                 except Exception:
@@ -702,13 +715,18 @@ class Client:
             # Small delay to let message route and target perform its punch
             await asyncio.sleep(0.2)
             
-            # 6. Perform our punch towards target's addresses
+            # 6. Perform our punch towards target's addresses (skip if local)
             try:
-                logger.info(f"P2P Punching from initiator port {local_port} to {target_addr}")
-                stun_punch_hole(stun_server, local_port, target_addr)
-                if target_lan_addr:
-                    logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr}")
-                    stun_punch_hole(stun_server, local_port, target_lan_addr)
+                target_ip = target_addr.split(":")[0]
+                is_target_local = self._is_loopback(target_ip) or self._is_private_ip(target_ip)
+                if not is_local and not is_target_local:
+                    logger.info(f"P2P Punching from initiator port {local_port} to {target_addr}")
+                    stun_punch_hole(stun_server, local_port, target_addr)
+                    if target_lan_addr:
+                        logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr}")
+                        stun_punch_hole(stun_server, local_port, target_lan_addr)
+                else:
+                    logger.info("Local network connection detected, bypassing initiator UDP punch")
             except Exception as e:
                 logger.warning(f"P2P Punching from initiator failed: {e}")
                 
@@ -814,7 +832,8 @@ class Client:
                 
                 stun_server = self._config.stun_server
                 public_addr = ""
-                if not self._is_loopback(self._config.server_host) and stun_server:
+                is_local = self._is_loopback(self._config.server_host) or self._is_private_ip(self._config.server_host)
+                if not is_local and stun_server:
                     try:
                         public_addr = stun_punch_hole(stun_server, local_port, "")
                     except Exception:
@@ -883,12 +902,20 @@ class Client:
                 local_server, _ = server_info
                 local_port = local_server._config.port
                 stun_server = self._config.stun_server
+                
+                is_local = self._is_loopback(self._config.server_host) or self._is_private_ip(self._config.server_host)
+                source_ip = source_addr.split(":")[0]
+                is_source_local = self._is_loopback(source_ip) or self._is_private_ip(source_ip)
+                
                 try:
-                    logger.info(f"P2P Punching from listener port {local_port} to {source_addr}")
-                    stun_punch_hole(stun_server, local_port, source_addr)
-                    if source_lan_addr:
-                        logger.info(f"P2P Punching from listener port {local_port} to LAN {source_lan_addr}")
-                        stun_punch_hole(stun_server, local_port, source_lan_addr)
+                    if not is_local and not is_source_local:
+                        logger.info(f"P2P Punching from listener port {local_port} to {source_addr}")
+                        stun_punch_hole(stun_server, local_port, source_addr)
+                        if source_lan_addr:
+                            logger.info(f"P2P Punching from listener port {local_port} to LAN {source_lan_addr}")
+                            stun_punch_hole(stun_server, local_port, source_lan_addr)
+                    else:
+                        logger.info("Local network connection detected, bypassing listener UDP punch")
                 except Exception as e:
                     logger.warning(f"P2P Punching from listener failed: {e}")
                 
