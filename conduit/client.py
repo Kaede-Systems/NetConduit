@@ -625,6 +625,16 @@ class Client:
             s.bind(('127.0.0.1', 0))
             return s.getsockname()[1]
 
+    def _get_local_ip(self) -> str:
+        """Get the local IP address of this machine."""
+        import socket
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+
     async def establish_p2p(self, target_client_id: str, timeout: float = 20.0) -> 'Client':
         """
         Establish a direct peer-to-peer connection to another client.
@@ -668,7 +678,7 @@ class Client:
             except Exception:
                 public_addr = ""
             if not public_addr:
-                public_addr = f"127.0.0.1:{local_port}"
+                public_addr = f"{self._get_local_ip()}:{local_port}"
                 
             # 5. Tell the target to punch towards our public address
             await self.send("p2p_punch_source", {
@@ -771,7 +781,7 @@ class Client:
                     public_addr = ""
                     
                 if not public_addr:
-                    public_addr = f"127.0.0.1:{local_port}"
+                    public_addr = f"{self._get_local_ip()}:{local_port}"
                 
                 await self.send("p2p_accept", {
                     "request_id": request_id,
