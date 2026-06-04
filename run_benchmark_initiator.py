@@ -9,6 +9,7 @@ async def main():
     parser.add_argument("--size-gb", type=float, default=5.0, help="Total data size to transfer in GB (default: 5.0)")
     parser.add_argument("--chunk-mb", type=int, default=50, help="Chunk size in MB (default: 50)")
     parser.add_argument("--parallel", action="store_true", help="Send chunks in parallel using thread pool")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers/streams to use (default: 4)")
     args = parser.parse_args()
 
     total_size_bytes = int(args.size_gb * 1024 * 1024 * 1024)
@@ -76,19 +77,21 @@ async def main():
         
         # Send chunks
         if args.parallel:
-            print(f"Sending {total_chunks} chunks in parallel...")
+            print(f"Sending {total_chunks} chunks in parallel using {args.workers} concurrent streams...")
+            sem = asyncio.Semaphore(args.workers)
             tasks = []
             
-            def send_chunk_sync(idx):
-                t_chunk_start = time.perf_counter()
-                peer_client.send_binary_stream("bench_chunk", chunk_data)
-                t_chunk_end = time.perf_counter()
-                duration_ms = (t_chunk_end - t_chunk_start) * 1000.0
-                speed_mb = (chunk_size_bytes / (1024 * 1024)) / (duration_ms / 1000.0)
-                print(f"  Parallel chunk {idx+1}/{total_chunks} completed in {duration_ms:.1f} ms ({speed_mb:.1f} MB/s)")
+            async def send_chunk_async(idx):
+                async with sem:
+                    t_chunk_start = time.perf_counter()
+                    await asyncio.to_thread(peer_client.send_binary_stream, "bench_chunk", chunk_data)
+                    t_chunk_end = time.perf_counter()
+                    duration_ms = (t_chunk_end - t_chunk_start) * 1000.0
+                    speed_mb = (chunk_size_bytes / (1024 * 1024)) / (duration_ms / 1000.0)
+                    print(f"  Parallel chunk {idx+1}/{total_chunks} completed in {duration_ms:.1f} ms ({speed_mb:.1f} MB/s)")
                 
             for i in range(total_chunks):
-                tasks.append(asyncio.to_thread(send_chunk_sync, i))
+                tasks.append(asyncio.create_task(send_chunk_async(i)))
                 
             await asyncio.gather(*tasks)
         else:
