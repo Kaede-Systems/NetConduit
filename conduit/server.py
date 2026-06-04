@@ -787,6 +787,7 @@ class Server:
                 future.set_result({
                     "accepted": data.get("accepted"),
                     "public_addr": data.get("public_addr"),
+                    "lan_addr": data.get("lan_addr"),
                     "reason": data.get("reason"),
                 })
 
@@ -794,6 +795,7 @@ class Server:
             target_id = data.get("target_id")
             request_id = data.get("request_id")
             source_addr = data.get("source_addr")
+            lan_addr = data.get("lan_addr")
             
             target_conn = self._pool.get(target_id)
             if not target_conn:
@@ -806,6 +808,7 @@ class Server:
                 await target_conn.send_message("p2p_punch_cmd", {
                     "request_id": request_id,
                     "source_addr": source_addr,
+                    "lan_addr": lan_addr,
                 })
 
         self._message_router.register("p2p_request", handle_p2p_request, requires_auth=True)

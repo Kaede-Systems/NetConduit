@@ -672,6 +672,7 @@ class Client:
                 raise ConnectionError(f"P2P connection rejected by {target_client_id}: {response.get('reason', 'Access Denied')}")
                 
             target_addr = response.get("public_addr")
+            target_lan_addr = response.get("lan_addr")
             
             # 3. Setup local punch socket port
             local_port = self._get_free_port()
@@ -690,42 +691,70 @@ class Client:
                 else:
                     public_addr = f"{self._get_local_ip()}:{local_port}"
                 
-            # 5. Tell the target to punch towards our public address
+            # 5. Tell the target to punch towards our public address and LAN address
             await self.send("p2p_punch_source", {
                 "request_id": request_id,
                 "source_addr": public_addr,
+                "lan_addr": f"{self._get_local_ip()}:{local_port}",
                 "target_id": target_client_id,
             })
             
             # Small delay to let message route and target perform its punch
             await asyncio.sleep(0.2)
             
-            # 6. Perform our punch towards target's address
+            # 6. Perform our punch towards target's addresses
             try:
                 logger.info(f"P2P Punching from initiator port {local_port} to {target_addr}")
                 stun_punch_hole(stun_server, local_port, target_addr)
+                if target_lan_addr:
+                    logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr}")
+                    stun_punch_hole(stun_server, local_port, target_lan_addr)
             except Exception as e:
                 logger.warning(f"P2P Punching from initiator failed: {e}")
                 
             await asyncio.sleep(0.1)
             
-            # 7. Connect directly to target!
-            host, port_str = target_addr.split(":")
-            port = int(port_str)
-            
-            from conduit import ClientDescriptor
-            peer_client = Client(ClientDescriptor(
-                server_host=host,
-                server_port=port,
-                password=self._config.password,
-                local_port=local_port,
-                reconnect_enabled=False,
-                name=f"{self._config.name}_to_{target_client_id}",
-            ))
-            
-            connected = await peer_client.connect()
-            if not connected:
-                raise ConnectionError(f"Failed to connect to peer at {target_addr}")
+            # 7. Connect directly to target! Try LAN first, then WAN
+            peer_client = None
+            if target_lan_addr:
+                try:
+                    host, port_str = target_lan_addr.split(":")
+                    port = int(port_str)
+                    from conduit import ClientDescriptor
+                    peer_client = Client(ClientDescriptor(
+                        server_host=host,
+                        server_port=port,
+                        password=self._config.password,
+                        local_port=local_port,
+                        reconnect_enabled=False,
+                        name=f"{self._config.name}_to_{target_client_id}_lan",
+                        connect_timeout=2,  # Quick timeout for local LAN try
+                    ))
+                    connected = await peer_client.connect()
+                    if connected:
+                        logger.info(f"Connected to peer via LAN address {target_lan_addr}")
+                    else:
+                        peer_client = None
+                except Exception as e:
+                    logger.warning(f"Failed to connect to LAN address {target_lan_addr}: {e}")
+                    peer_client = None
+                    
+            if not peer_client:
+                host, port_str = target_addr.split(":")
+                port = int(port_str)
+                from conduit import ClientDescriptor
+                peer_client = Client(ClientDescriptor(
+                    server_host=host,
+                    server_port=port,
+                    password=self._config.password,
+                    local_port=local_port,
+                    reconnect_enabled=False,
+                    name=f"{self._config.name}_to_{target_client_id}",
+                ))
+                connected = await peer_client.connect()
+                if not connected:
+                    raise ConnectionError(f"Failed to connect to peer at {target_addr}")
+                logger.info(f"Connected to peer via WAN address {target_addr}")
                 
             return peer_client
             
@@ -801,6 +830,7 @@ class Client:
                     "request_id": request_id,
                     "accepted": True,
                     "public_addr": public_addr,
+                    "lan_addr": f"{self._get_local_ip()}:{local_port}",
                 })
                 
                 # Wait for connection in background
@@ -841,6 +871,7 @@ class Client:
         async def handle_p2p_punch_cmd(connection, data):
             request_id = data.get("request_id")
             source_addr = data.get("source_addr")
+            source_lan_addr = data.get("lan_addr")
             
             server_info = self._p2p_servers.get(request_id)
             if server_info:
@@ -850,6 +881,9 @@ class Client:
                 try:
                     logger.info(f"P2P Punching from listener port {local_port} to {source_addr}")
                     stun_punch_hole(stun_server, local_port, source_addr)
+                    if source_lan_addr:
+                        logger.info(f"P2P Punching from listener port {local_port} to LAN {source_lan_addr}")
+                        stun_punch_hole(stun_server, local_port, source_lan_addr)
                 except Exception as e:
                     logger.warning(f"P2P Punching from listener failed: {e}")
                 
