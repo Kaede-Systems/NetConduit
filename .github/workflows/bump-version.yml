@@ -1,0 +1,108 @@
+name: Bump Version & Release
+
+# Usage:
+#   git tag release && git push origin release   → minor bump  (4.0.0 → 4.1.0)
+#   git tag prod    && git push origin prod      → major bump  (4.0.0 → 5.0.0)
+#
+# The workflow:
+#   1. Reads the latest v* tag to determine current version
+#   2. Calculates the next version
+#   3. Updates version in all package files
+#   4. Commits + pushes a new v<X.Y.0> tag
+#   5. The new tag triggers publish.yml automatically
+
+on:
+  push:
+    tags:
+      - 'release'
+      - 'prod'
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # need full history to read all tags
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Calculate next version
+        id: ver
+        run: |
+          # Get latest vX.Y.Z tag (sorted descending)
+          CURRENT=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$CURRENT" ]; then
+            CURRENT="v1.0.0"
+          fi
+          echo "Current tag: $CURRENT"
+
+          # Strip leading 'v'
+          VERSION="${CURRENT#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+
+          # Determine bump type from the triggering tag
+          TRIGGER_TAG="${GITHUB_REF#refs/tags/}"
+          echo "Trigger: $TRIGGER_TAG"
+
+          if [ "$TRIGGER_TAG" = "prod" ]; then
+            NEW_MAJOR=$((MAJOR + 1))
+            NEW_VERSION="${NEW_MAJOR}.0.0"
+          else
+            # release → minor bump
+            NEW_MINOR=$((MINOR + 1))
+            NEW_VERSION="${MAJOR}.${NEW_MINOR}.0"
+          fi
+
+          echo "New version: v${NEW_VERSION}"
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEW_VERSION}"    >> "$GITHUB_OUTPUT"
+
+      - name: Update version in package files
+        run: |
+          NEW="${{ steps.ver.outputs.version }}"
+
+          # netconduit_core/pyproject.toml  →  version = "X.Y.Z"
+          sed -i "s/^version = \"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\"/version = \"${NEW}\"/" \
+            netconduit_core/pyproject.toml
+
+          # root pyproject.toml  →  version = "X.Y.Z"
+          sed -i "s/^version = \"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\"/version = \"${NEW}\"/" \
+            pyproject.toml
+
+          # netconduit_core/Cargo.toml  →  version = "X.Y.Z"
+          sed -i "s/^version = \"[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\"/version = \"${NEW}\"/" \
+            netconduit_core/Cargo.toml
+
+          echo "Updated files:"
+          grep '^version' netconduit_core/pyproject.toml pyproject.toml netconduit_core/Cargo.toml
+
+      - name: Commit version bump
+        run: |
+          NEW="${{ steps.ver.outputs.version }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+
+          git add netconduit_core/pyproject.toml pyproject.toml netconduit_core/Cargo.toml
+          git commit -m "chore: bump version to ${NEW}"
+
+          # Push commit to main
+          git push origin HEAD:main
+
+          # Push the version tag — this triggers publish.yml
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      # Clean up the transient trigger tag so it can be reused next time
+      - name: Delete trigger tag
+        run: |
+          TRIGGER_TAG="${GITHUB_REF#refs/tags/}"
+          git push origin ":refs/tags/${TRIGGER_TAG}" || true
