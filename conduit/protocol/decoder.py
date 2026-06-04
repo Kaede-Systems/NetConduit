@@ -1,18 +1,30 @@
 """
-Conduit Protocol Decoder
-
-Decodes binary messages from the wire format.
+Conduit Protocol Decoder — Protobuf + length-prefix framing with multi-codec decompression.
 """
 
-from typing import Any, Optional, Tuple
-import msgpack
+from typing import Any, Optional, Union
+import json
 
+try:
+    from netconduit_core import decompress_payload as _rust_decompress
+    _RUST_COMPRESSION = True
+except ImportError:
+    _RUST_COMPRESSION = False
+
+from .protocol_pb2 import (
+    Packet,
+    AuthRequestPayload,
+    AuthResponsePayload,
+    RPCRequestPayload,
+    RPCResponsePayload,
+    MessagePayload,
+    StreamDataPayload,
+    FileChunkPayload,
+)
 from .format import (
     MessageHeader,
     MessageType,
     MessageFlags,
-    HEADER_SIZE,
-    MAX_PAYLOAD_SIZE,
 )
 
 
@@ -23,24 +35,41 @@ class DecodeError(Exception):
 
 class IncompleteMessageError(Exception):
     """Message is incomplete, need more data."""
-    
     def __init__(self, bytes_needed: int):
         self.bytes_needed = bytes_needed
         super().__init__(f"Need {bytes_needed} more bytes")
 
 
+def deserialize_data(data_bytes: bytes) -> Any:
+    if not data_bytes:
+        return None
+    try:
+        return json.loads(data_bytes.decode('utf-8'))
+    except Exception:
+        try:
+            return data_bytes.decode('utf-8')
+        except Exception:
+            return data_bytes
+
+
 class DecodedMessage:
-    """Represents a decoded message."""
+    """Represents a decoded message wrapper compatible with the TCP codebase."""
     
     def __init__(
         self,
         header: MessageHeader,
         payload: Any,
         raw_payload: bytes,
+        route_src: str = "",
+        route_dst: str = "",
+        is_mesh: bool = False,
     ):
         self.header = header
         self.payload = payload
         self.raw_payload = raw_payload
+        self.route_src = route_src
+        self.route_dst = route_dst
+        self.is_mesh = is_mesh
     
     @property
     def message_type(self) -> MessageType:
@@ -82,7 +111,8 @@ class DecodedMessage:
     def get_rpc_params(self) -> dict:
         """Get RPC parameters for RPC_REQUEST."""
         if self.message_type == MessageType.RPC_REQUEST and isinstance(self.payload, dict):
-            return self.payload.get("params", {})
+            res = self.payload.get("params")
+            return res if isinstance(res, dict) else {}
         return {}
     
     def get_rpc_result(self) -> Any:
@@ -109,73 +139,36 @@ class DecodedMessage:
 
 
 class ProtocolDecoder:
-    """Decodes messages from binary protocol format."""
+    """Decodes messages from binary protocol format using Protobuf."""
     
     def __init__(self):
         """Initialize decoder."""
         self._buffer = bytearray()
     
     def feed(self, data: bytes) -> None:
-        """
-        Add data to the internal buffer.
-        
-        Args:
-            data: Received bytes to add to buffer
-        """
+        """Add data to the internal buffer."""
         self._buffer.extend(data)
     
     def decode_one(self) -> Optional[DecodedMessage]:
-        """
-        Try to decode one complete message from buffer.
-        
-        Returns:
-            DecodedMessage if a complete message is available, None otherwise
-        """
-        # Need at least a header
-        if len(self._buffer) < HEADER_SIZE:
+        """Try to decode one complete message from buffer."""
+        if len(self._buffer) < 4:
             return None
-        
+        length = int.from_bytes(self._buffer[:4], byteorder='big')
+        # Sanity check to avoid huge allocations/incorrect parsing
+        if length > 100 * 1024 * 1024:
+            self._buffer.clear()
+            return None
+        if len(self._buffer) < 4 + length:
+            return None
+        packet_bytes = bytes(self._buffer[4:4+length])
+        del self._buffer[:4+length]
         try:
-            # Parse header
-            header = MessageHeader.from_bytes(bytes(self._buffer[:HEADER_SIZE]))
-            header.validate()
-            
-            # Calculate total message size
-            total_size = HEADER_SIZE + header.content_length
-            
-            # Check if we have the complete message
-            if len(self._buffer) < total_size:
-                return None
-            
-            # Extract payload
-            raw_payload = bytes(self._buffer[HEADER_SIZE:total_size])
-            
-            # Remove message from buffer
-            del self._buffer[:total_size]
-            
-            # Decompress if needed
-            if header.flags & MessageFlags.COMPRESSED:
-                import zlib
-                raw_payload = zlib.decompress(raw_payload)
-            
-            # Deserialize payload
-            if raw_payload:
-                payload = msgpack.unpackb(raw_payload, raw=False)
-            else:
-                payload = None
-            
-            return DecodedMessage(header, payload, raw_payload)
-            
+            return self.decode_single(packet_bytes)
         except Exception as e:
             raise DecodeError(f"Failed to decode message: {e}") from e
-    
+            
     def decode_all(self) -> list[DecodedMessage]:
-        """
-        Decode all complete messages from buffer.
-        
-        Returns:
-            List of decoded messages
-        """
+        """Decode all complete messages from buffer."""
         messages = []
         while True:
             msg = self.decode_one()
@@ -188,45 +181,114 @@ class ProtocolDecoder:
     def decode_single(data: bytes) -> DecodedMessage:
         """
         Decode a single complete message from bytes.
-        
-        Args:
-            data: Complete message bytes
-            
-        Returns:
-            Decoded message
-            
-        Raises:
-            IncompleteMessageError: If data is incomplete
-            DecodeError: If decoding fails
         """
-        if len(data) < HEADER_SIZE:
-            raise IncompleteMessageError(HEADER_SIZE - len(data))
+        packet = Packet()
+        parsed = False
         
+        # Try direct parse first
         try:
-            header = MessageHeader.from_bytes(data[:HEADER_SIZE])
-            header.validate()
+            packet.ParseFromString(data)
+            parsed = True
+        except Exception:
+            pass
             
-            total_size = HEADER_SIZE + header.content_length
-            
-            if len(data) < total_size:
-                raise IncompleteMessageError(total_size - len(data))
-            
-            raw_payload = data[HEADER_SIZE:total_size]
-            
-            if header.flags & MessageFlags.COMPRESSED:
+        # If direct parse failed, check if length-prefixed
+        if not parsed:
+            if len(data) < 4:
+                raise IncompleteMessageError(4 - len(data))
+            length = int.from_bytes(data[:4], byteorder='big')
+            if len(data) < 4 + length:
+                raise IncompleteMessageError(4 + length - len(data))
+            try:
+                packet.ParseFromString(data[4:4+length])
+            except Exception as e:
+                raise DecodeError(f"Failed to decode message: {e}") from e
+                
+        try:
+            payload_bytes = packet.payload
+            flags = packet.flags
+
+            # Decompress based on which codec flag is set
+            if flags & MessageFlags.CODEC_LZ4:
+                if _RUST_COMPRESSION:
+                    payload_bytes = _rust_decompress(bytes([1]) + payload_bytes)
+                # If Rust not available, try to pass through (best effort)
+            elif flags & MessageFlags.CODEC_ZSTD:
+                if _RUST_COMPRESSION:
+                    payload_bytes = _rust_decompress(bytes([2]) + payload_bytes)
+            elif flags & MessageFlags.COMPRESSED:
+                # Legacy zlib path (backward compatibility)
                 import zlib
-                raw_payload = zlib.decompress(raw_payload)
+                payload_bytes = zlib.decompress(payload_bytes)
+
+            msg_type = MessageType(packet.type)
+            payload = None
             
-            if raw_payload:
-                payload = msgpack.unpackb(raw_payload, raw=False)
+            if msg_type == MessageType.MESSAGE:
+                p = MessagePayload()
+                p.ParseFromString(payload_bytes)
+                payload = {
+                    "type": p.type,
+                    "data": deserialize_data(p.data),
+                }
+            elif msg_type == MessageType.RPC_REQUEST:
+                p = RPCRequestPayload()
+                p.ParseFromString(payload_bytes)
+                payload = {
+                    "method": p.method,
+                    "params": deserialize_data(p.params),
+                }
+            elif msg_type in (MessageType.RPC_RESPONSE, MessageType.RPC_ERROR):
+                p = RPCResponsePayload()
+                p.ParseFromString(payload_bytes)
+                payload = {
+                    "success": p.success,
+                    "result": deserialize_data(p.result) if p.success else None,
+                    "error": p.error if not p.success else None,
+                    "code": p.code,
+                }
+            elif msg_type == MessageType.AUTH_REQUEST:
+                p = AuthRequestPayload()
+                p.ParseFromString(payload_bytes)
+                payload = {
+                    "password_hash": p.password_hash,
+                    "client_info": dict(p.client_info),
+                }
+            elif msg_type in (MessageType.AUTH_SUCCESS, MessageType.AUTH_FAILURE):
+                p = AuthResponsePayload()
+                p.ParseFromString(payload_bytes)
+                payload = {
+                    "success": p.success,
+                    "session_token": p.session_token,
+                    "server_info": dict(p.server_info),
+                    "reason": p.reason,
+                }
             else:
-                payload = None
+                # Heartbeats, Pause, Resume, Close, CloseAck
+                payload = deserialize_data(payload_bytes)
+                
+            header = MessageHeader(
+                magic=b'CNDT',
+                version=packet.version,
+                message_type=msg_type,
+                flags=MessageFlags(packet.flags),
+                reserved=0,
+                content_length=len(payload_bytes),
+                correlation_id=packet.correlation_id,
+                timestamp=packet.timestamp
+            )
+            return DecodedMessage(
+                header,
+                payload,
+                payload_bytes,
+                route_src=getattr(packet, "route_src", ""),
+                route_dst=getattr(packet, "route_dst", ""),
+                is_mesh=getattr(packet, "is_mesh", False),
+            )
             
-            return DecodedMessage(header, payload, raw_payload)
-            
-        except (IncompleteMessageError, DecodeError):
-            raise
         except Exception as e:
+            if isinstance(e, IncompleteMessageError):
+                raise
             raise DecodeError(f"Failed to decode message: {e}") from e
     
     def buffer_size(self) -> int:
@@ -238,16 +300,24 @@ class ProtocolDecoder:
         self._buffer.clear()
     
     def peek_header(self) -> Optional[MessageHeader]:
-        """
-        Peek at the header without consuming it.
-        
-        Returns:
-            MessageHeader if enough data, None otherwise
-        """
-        if len(self._buffer) < HEADER_SIZE:
+        """Peek at the header without consuming it."""
+        if len(self._buffer) < 4:
             return None
-        
         try:
-            return MessageHeader.from_bytes(bytes(self._buffer[:HEADER_SIZE]))
+            length = int.from_bytes(self._buffer[:4], byteorder='big')
+            if len(self._buffer) < 4 + length:
+                return None
+            packet = Packet()
+            packet.ParseFromString(bytes(self._buffer[4:4+length]))
+            return MessageHeader(
+                magic=b'CNDT',
+                version=packet.version,
+                message_type=MessageType(packet.type),
+                flags=MessageFlags(packet.flags),
+                reserved=0,
+                content_length=len(packet.payload),
+                correlation_id=packet.correlation_id,
+                timestamp=packet.timestamp
+            )
         except Exception:
             return None

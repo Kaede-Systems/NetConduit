@@ -1,9 +1,19 @@
 """
-Conduit - Production-Ready Async Bidirectional TCP Communication Library
+Conduit - High-Performance Async Bidirectional QUIC Communication Library
 
-A Python library for secure, asynchronous, bidirectional communication over raw TCP.
-Features: Custom binary protocol, password authentication, type-safe RPC with Pydantic,
-heartbeat monitoring, backpressure flow control, and Flask/FastAPI-inspired API.
+A Python library for secure, high-performance, asynchronous bidirectional communication
+built on QUIC (Quinn/Rust), with features including:
+  - ED25519 self-signed TLS certificates for transport security
+  - UDP hole-punching via STUN for NAT traversal
+  - mDNS-based local and remote peer discovery
+  - Mesh network routing with zero-copy relay
+  - Blake3 checksums for payload integrity
+  - Sled-backed persistent route cache (session-bound)
+  - IPv4 and IPv6 support
+  - Password authentication with Pydantic-validated RPC
+  - Gating: role/permission/custom callback guards
+  - Binary stream send/receive over QUIC bidir streams
+  - Backpressure and rate limiting
 
 Usage:
     from conduit import Server, Client, ServerDescriptor, ClientDescriptor
@@ -17,8 +27,8 @@ Usage:
         return {"message": f"Hello, {data['name']}!"}
     
     @server.rpc
-    async def add(request: AddRequest) -> int:
-        return request.a + request.b
+    async def add(a: int, b: int) -> int:
+        return a + b
     
     await server.run()
     
@@ -146,7 +156,6 @@ __all__ = [
     # Streaming
     "Stream",
     "StreamManager",
-    "ClientStreamConsumer",
     
     # Client Pool
     "ClientPool",

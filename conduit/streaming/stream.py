@@ -223,19 +223,22 @@ class BidirectionalStream:
             except asyncio.QueueFull:
                 pass
         
+        # Notify local queue/iterator
+        try:
+            self._data_queue.put_nowait(close_msg)
+        except asyncio.QueueFull:
+            pass
+        
         self._subscribers.clear()
         logger.info(f"Stream {self.name} closed")
     
     async def __aiter__(self) -> AsyncIterator[Any]:
         """Async iterator for consuming stream data."""
-        while self._running:
-            try:
-                msg = await asyncio.wait_for(self._data_queue.get(), timeout=1.0)
-                if msg.get("closed"):
-                    break
-                yield msg.get("data")
-            except asyncio.TimeoutError:
-                continue
+        while True:
+            msg = await self._data_queue.get()
+            if msg is None or msg.get("closed"):
+                break
+            yield msg.get("data")
 
 
 class StreamManager:

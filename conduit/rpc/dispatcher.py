@@ -107,7 +107,7 @@ class RPCDispatcher:
         self,
         rpc_method: RPCMethod,
         params: Dict[str, Any]
-    ) -> Any:
+    ) -> Dict[str, Any]:
         """
         Validate parameters against the method's expected types.
         
@@ -116,14 +116,45 @@ class RPCDispatcher:
             params: Raw parameters
             
         Returns:
-            Validated parameters (may be Pydantic model instance)
+            Validated parameters dictionary
         """
-        if rpc_method.pydantic_model is not None:
-            # Validate using Pydantic model
-            return rpc_method.pydantic_model(**params)
+        import inspect
+        handler = rpc_method.handler
+        sig = inspect.signature(handler)
         
-        # Return as-is if no model
-        return params
+        validated = {}
+        
+        # Check if the handler signature has a single parameter of type BaseModel
+        # (This is the standard backwards-compatible single-model pattern)
+        has_single_model = False
+        if len(sig.parameters) == 1:
+            param = list(sig.parameters.values())[0]
+            param_type = param.annotation
+            if isinstance(param_type, type) and issubclass(param_type, BaseModel):
+                has_single_model = True
+                # Validate the entire params dict as the model
+                validated[param.name] = param_type(**params)
+                
+        if not has_single_model:
+            # Bind parameters individually
+            for param_name, param in sig.parameters.items():
+                param_type = param.annotation
+                
+                # Check if this parameter is a Pydantic model
+                if isinstance(param_type, type) and issubclass(param_type, BaseModel):
+                    # Extract fields belonging to the model
+                    model_fields = {}
+                    for field_name in param_type.model_fields:
+                        if field_name in params:
+                            model_fields[field_name] = params[field_name]
+                    # Validate and construct the model
+                    validated[param_name] = param_type(**model_fields)
+                elif param_name in params:
+                    validated[param_name] = params[param_name]
+                elif param.default is not inspect.Parameter.empty:
+                    pass
+                    
+        return validated
     
     async def _execute_handler(
         self,
@@ -131,7 +162,12 @@ class RPCDispatcher:
         params: Any
     ) -> Any:
         """
-        Execute the RPC handler.
+        Execute the RPC handler as a non-blocking task.
+        
+        Handlers run as independent asyncio Tasks so they:
+        - Don't block the event loop for other connections
+        - Can be awaited with a server-side timeout
+        - Are automatically cleaned up when cancelled
         
         Args:
             rpc_method: The RPC method
@@ -140,21 +176,28 @@ class RPCDispatcher:
         Returns:
             Handler result
         """
+        import inspect
         handler = rpc_method.handler
         
-        # If params is a Pydantic model, pass it as single argument
-        if isinstance(params, BaseModel):
-            result = handler(params)
-        elif isinstance(params, dict):
-            result = handler(**params)
+        if isinstance(params, dict):
+            coro_or_result = handler(**params)
         else:
-            result = handler(params)
+            coro_or_result = handler(params)
         
-        # Await if coroutine
-        if asyncio.iscoroutine(result):
-            result = await result
+        # Await if awaitable — run as a task for proper cancellation support
+        if inspect.isawaitable(coro_or_result):
+            # Create a task so it's independently scheduled
+            task = asyncio.ensure_future(coro_or_result)
+            try:
+                result = await task
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+        else:
+            result = coro_or_result
         
         return result
+
     
     def _handle_listall(self) -> Dict[str, Any]:
         """

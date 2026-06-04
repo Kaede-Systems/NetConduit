@@ -310,10 +310,14 @@ class TCPServer:
             except Exception as e:
                 logger.error(f"Error handling connection from {remote}: {e}")
             finally:
-                await socket_wrapper.close()
-                if task:
-                    self._connections.discard(task)
-                logger.debug(f"Connection closed from {remote}")
+                try:
+                    await asyncio.shield(socket_wrapper.close())
+                except Exception:
+                    pass
+                finally:
+                    if task:
+                        self._connections.discard(task)
+                    logger.debug(f"Connection closed from {remote}")
     
     async def wait_until_stopped(self) -> None:
         """Wait until server is stopped."""

@@ -1,0 +1,27 @@
+[package]
+name = "netconduit_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "netconduit_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+tokio = { version = "1.35", features = ["full"] }
+quinn = "0.11.2"
+prost = "0.13.1"
+rcgen = "0.13.1"
+rustls = { version = "0.23.5", features = ["ring", "std"] }
+anyhow = "1.0.86"
+bytes = "1.6.0"
+ring = "0.17.8"
+sled = "0.34.7"
+blake3 = "1.5.1"
+hex = "0.4.3"
+lz4_flex = { version = "0.11", features = ["frame"] }
+zstd = "0.13"
+
+[build-dependencies]
+prost-build = "0.13.1"

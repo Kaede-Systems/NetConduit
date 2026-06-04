@@ -1,9 +1,10 @@
 """
 Conduit Heartbeat Package
 
-Connection health monitoring.
+Application-level connection health monitoring.
 """
 
 from .monitor import HeartbeatMonitor
+from .manager import HeartbeatManager
 
-__all__ = ["HeartbeatMonitor"]
+__all__ = ["HeartbeatMonitor", "HeartbeatManager"]

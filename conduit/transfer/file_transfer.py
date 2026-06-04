@@ -140,9 +140,10 @@ class FileTransferHandler:
             return await self.start_receive(filename, size, checksum)
         
         @server.rpc
-        async def file_upload_chunk(transfer_id: str, chunk_index: int, data_b64: str) -> dict:
+        async def file_upload_chunk(transfer_id: str, chunk_index: int, chunk_data: Any = None, data_b64: Optional[str] = None) -> dict:
             """Receive a file chunk from client."""
-            return await self.receive_chunk(transfer_id, chunk_index, data_b64)
+            data_to_use = chunk_data if chunk_data is not None else data_b64
+            return await self.receive_chunk(transfer_id, chunk_index, data_to_use)
         
         @server.rpc
         async def file_upload_complete(transfer_id: str) -> dict:
@@ -204,9 +205,11 @@ class FileTransferHandler:
             """Receive a chunk from server."""
             transfer_id = msg.get("transfer_id")
             chunk_index = msg.get("chunk_index")
-            data_b64 = msg.get("data_b64")
+            chunk_data = msg.get("chunk_data")
+            if chunk_data is None:
+                chunk_data = msg.get("data_b64")
             
-            result = await self.receive_chunk(transfer_id, chunk_index, data_b64)
+            result = await self.receive_chunk(transfer_id, chunk_index, chunk_data)
             
             # Progress callback
             if self._on_transfer_progress:
@@ -285,12 +288,10 @@ class FileTransferHandler:
                 if not chunk:
                     break
                 
-                chunk_b64 = base64.b64encode(chunk).decode()
-                
                 result = await client.rpc.call("file_upload_chunk", args=data(
                     transfer_id=transfer_id,
                     chunk_index=chunk_index,
-                    data_b64=chunk_b64,
+                    chunk_data=chunk,
                 ))
                 
                 if not result.get("success"):
@@ -370,12 +371,10 @@ class FileTransferHandler:
                 if not chunk:
                     break
                 
-                chunk_b64 = base64.b64encode(chunk).decode()
-                
                 await connection.send_message("file_chunk", {
                     "transfer_id": transfer_id,
                     "chunk_index": chunk_index,
-                    "data_b64": chunk_b64,
+                    "chunk_data": chunk,
                 })
                 
                 progress.transferred += len(chunk)
@@ -452,8 +451,12 @@ class FileTransferHandler:
                 if not result.get("success"):
                     return result
                 
-                chunk_b64 = result.get("data", {}).get("data_b64", "")
-                chunk = base64.b64decode(chunk_b64)
+                chunk_data = result.get("data", {}).get("chunk_data")
+                if chunk_data is None:
+                    chunk_b64 = result.get("data", {}).get("data_b64", "")
+                    chunk = base64.b64decode(chunk_b64)
+                else:
+                    chunk = chunk_data
                 f.write(chunk)
                 
                 progress.transferred += len(chunk)
@@ -505,14 +508,18 @@ class FileTransferHandler:
         self,
         transfer_id: str,
         chunk_index: int,
-        data_b64: str,
+        chunk_data: Any,
     ) -> dict:
         """Receive a file chunk."""
         transfer = self._active_transfers.get(transfer_id)
         if not transfer:
             return {"error": "Transfer not found"}
         
-        chunk = base64.b64decode(data_b64)
+        if isinstance(chunk_data, str):
+            chunk = base64.b64decode(chunk_data)
+        else:
+            chunk = chunk_data
+            
         transfer["file"].write(chunk)
         transfer["received_chunks"] += 1
         
@@ -595,7 +602,7 @@ class FileTransferHandler:
         
         return {
             "chunk_index": chunk_index,
-            "data_b64": base64.b64encode(chunk).decode(),
+            "chunk_data": chunk,
             "size": len(chunk),
         }
     

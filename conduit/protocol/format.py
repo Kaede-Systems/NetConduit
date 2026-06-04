@@ -1,20 +1,29 @@
 """
 Conduit Protocol Format
 
-Defines the binary protocol used for communication between client and server.
-All messages follow a fixed header format followed by a variable-length payload.
+Wire framing layout (per message):
 
-Header Format (32 bytes):
-| Field          | Offset | Size | Type   | Description                    |
-|----------------|--------|------|--------|--------------------------------|
-| Magic          | 0      | 4    | bytes  | b'CNDT' (protocol identifier)  |
-| Version        | 4      | 2    | uint16 | Protocol version (1.0 = 0x0100)|
-| Message Type   | 6      | 2    | uint16 | Message type enum              |
-| Flags          | 8      | 2    | uint16 | Control flags                  |
-| Reserved       | 10     | 2    | uint16 | Reserved for future use        |
-| Content Length | 12     | 4    | uint32 | Payload length in bytes        |
-| Correlation ID | 16     | 8    | uint64 | Match requests/responses       |
-| Timestamp      | 24     | 8    | uint64 | Unix timestamp (milliseconds)  |
+  [4B frame_length BE] [protobuf Packet bytes]
+
+  frame_length is always big-endian regardless of payload byte order.
+  The Packet.byte_order field describes the byte order of raw binary
+  payload data (0 = big-endian / network order, 1 = little-endian).
+
+Packet fields relevant to ordering:
+  sequence_id  uint64  — monotonically increasing per (connection, stream_id)
+  stream_id    uint32  — logical channel; 0 = unordered (bypass reorder buffer)
+  byte_order   uint32  — 0 = BE (default), 1 = LE
+
+MessageHeader (legacy 32-byte struct, big-endian):
+  Offset  Size  Field
+  0       4     Magic b'CNDT'
+  4       2     Protocol version (0x0100 = 1.0)
+  6       2     Message type
+  8       2     Flags
+  10      2     Reserved
+  12      4     Content length
+  16      8     Correlation ID
+  24      8     Timestamp (ms)
 """
 
 import struct
@@ -24,80 +33,136 @@ from typing import Optional
 import time
 
 
-# Protocol constants
-MAGIC = b'CNDT'
-MAGIC_INT = 0x434E4454  # 'CNDT' as big-endian int
-HEADER_SIZE = 32
-MAX_PAYLOAD_SIZE = 100 * 1024 * 1024  # 100MB max payload
-PROTOCOL_VERSION = 0x0100  # Version 1.0
+# ─── Protocol constants ───────────────────────────────────────────────────────
 
+MAGIC            = b'CNDT'
+MAGIC_INT        = 0x434E4454       # 'CNDT' as big-endian uint32
+HEADER_SIZE      = 32
+MAX_PAYLOAD_SIZE = 100 * 1024 * 1024
+PROTOCOL_VERSION = 0x0100           # 1.0
+
+# ─── Byte order ───────────────────────────────────────────────────────────────
+
+class ByteOrder(IntEnum):
+    """
+    Byte order for raw binary payload fields.
+    The framing layer (frame_length) is always big-endian.
+    """
+    BE = 0   # Big-endian / network order (default)
+    LE = 1   # Little-endian (x86/ARM native)
+
+    @staticmethod
+    def native() -> 'ByteOrder':
+        """Return the host's native byte order."""
+        import sys
+        return ByteOrder.LE if sys.byteorder == 'little' else ByteOrder.BE
+
+    def to_struct_prefix(self) -> str:
+        """Return the struct module prefix character for this byte order."""
+        return '<' if self == ByteOrder.LE else '>'
+
+    def pack_u32(self, value: int) -> bytes:
+        fmt = '<I' if self == ByteOrder.LE else '>I'
+        return struct.pack(fmt, value)
+
+    def pack_u64(self, value: int) -> bytes:
+        fmt = '<Q' if self == ByteOrder.LE else '>Q'
+        return struct.pack(fmt, value)
+
+    def unpack_u32(self, data: bytes, offset: int = 0) -> int:
+        fmt = '<I' if self == ByteOrder.LE else '>I'
+        return struct.unpack_from(fmt, data, offset)[0]
+
+    def unpack_u64(self, data: bytes, offset: int = 0) -> int:
+        fmt = '<Q' if self == ByteOrder.LE else '>Q'
+        return struct.unpack_from(fmt, data, offset)[0]
+
+
+# ─── Message types ────────────────────────────────────────────────────────────
 
 class MessageType(IntEnum):
     """Message type identifiers."""
-    
-    # Regular messages
-    MESSAGE = 0x0001           # Regular message with type and data
-    
-    # RPC messages
-    RPC_REQUEST = 0x0002       # RPC method call
-    RPC_RESPONSE = 0x0003      # RPC result (success)
-    RPC_ERROR = 0x0004         # RPC error response
-    
-    # Control messages
-    HEARTBEAT_PING = 0x0005    # Heartbeat ping
-    HEARTBEAT_PONG = 0x0006    # Heartbeat pong
-    
-    # Authentication
-    AUTH_REQUEST = 0x0007      # Authentication request
-    AUTH_SUCCESS = 0x0008      # Authentication success
-    AUTH_FAILURE = 0x0009      # Authentication failed
-    
-    # Flow control
-    PAUSE = 0x000A             # Backpressure pause
-    RESUME = 0x000B            # Backpressure resume
-    
-    # Acknowledgment
-    ACK = 0x000C               # Message acknowledgment
-    NACK = 0x000D              # Negative acknowledgment
-    
-    # Connection lifecycle
-    CLOSE = 0x000E             # Connection close request
-    CLOSE_ACK = 0x000F         # Connection close acknowledgment
-    
-    # Discovery
-    RPC_LIST = 0x0010          # List available RPC methods
 
+    MESSAGE        = 0x0001
+    RPC_REQUEST    = 0x0002
+    RPC_RESPONSE   = 0x0003
+    RPC_ERROR      = 0x0004
+    HEARTBEAT_PING = 0x0005
+    HEARTBEAT_PONG = 0x0006
+    AUTH_REQUEST   = 0x0007
+    AUTH_SUCCESS   = 0x0008
+    AUTH_FAILURE   = 0x0009
+    PAUSE          = 0x000A
+    RESUME         = 0x000B
+    ACK            = 0x000C
+    NACK           = 0x000D
+    CLOSE          = 0x000E
+    CLOSE_ACK      = 0x000F
+    RPC_LIST       = 0x0010
+
+
+# ─── Message flags ────────────────────────────────────────────────────────────
 
 class MessageFlags(IntFlag):
-    """Message flags for additional control."""
-    
-    NONE = 0x0000
-    COMPRESSED = 0x0001        # Payload is compressed
-    ENCRYPTED = 0x0002         # Payload is encrypted (beyond TLS)
-    REQUIRE_ACK = 0x0004       # Sender expects acknowledgment
-    PRIORITY = 0x0008          # High priority message
-    FRAGMENT = 0x0010          # Message is fragmented
-    LAST_FRAGMENT = 0x0020     # Last fragment of fragmented message
-    BINARY = 0x0040            # Payload is binary (not text/JSON)
+    """Message flags carried in Packet.flags."""
 
+    NONE          = 0x0000
+    COMPRESSED    = 0x0001   # Legacy zlib (backward compat only)
+    ENCRYPTED     = 0x0002   # Payload is encrypted (beyond TLS)
+    REQUIRE_ACK   = 0x0004   # Sender expects an ACK
+    PRIORITY      = 0x0008   # High-priority message
+    FRAGMENT      = 0x0010   # This packet is a fragment
+    LAST_FRAGMENT = 0x0020   # Last fragment of a fragmented message
+    BINARY        = 0x0040   # Payload is raw binary (not text/JSON)
+    CODEC_LZ4     = 0x0080   # Payload compressed with LZ4
+    CODEC_ZSTD    = 0x0100   # Payload compressed with Zstd
+    ORDERED       = 0x0200   # Receiver must use reorder buffer for this packet
+    BYTE_ORDER_LE = 0x0400   # Payload binary data is little-endian
+
+
+# ─── Ordering helpers ─────────────────────────────────────────────────────────
+
+# stream_id=0 means "no ordering" (bypass the reorder buffer).
+STREAM_UNORDERED = 0
+
+
+def make_stream_id(category: int, index: int) -> int:
+    """
+    Compose a stream_id from a category (upper 16 bits) and an index
+    (lower 16 bits). Helps namespacing streams without collisions.
+
+    Example:
+        STREAM_RPC    = make_stream_id(1, 0)   # ordered RPC replies
+        STREAM_EVENTS = make_stream_id(2, 0)   # ordered event stream
+    """
+    return ((category & 0xFFFF) << 16) | (index & 0xFFFF)
+
+
+# ─── MessageHeader (legacy / framing reference) ───────────────────────────────
 
 @dataclass
 class MessageHeader:
-    """Represents a protocol message header."""
-    
-    magic: bytes
-    version: int
-    message_type: MessageType
-    flags: MessageFlags
-    reserved: int
+    """
+    In-memory representation of a decoded Packet header.
+    The on-wire format is the protobuf Packet; this struct exists for
+    compatibility with code that inspects headers before full decode.
+    """
+
+    magic:          bytes
+    version:        int
+    message_type:   MessageType
+    flags:          MessageFlags
+    reserved:       int
     content_length: int
     correlation_id: int
-    timestamp: int
-    
-    # Header format: 4s = 4 bytes, H = uint16, I = uint32, Q = uint64
-    # Big-endian (network byte order)
+    timestamp:      int
+    sequence_id:    int = 0
+    stream_id:      int = 0
+    byte_order:     ByteOrder = ByteOrder.BE
+
+    # Struct is big-endian (network byte order) — framing layer only.
     STRUCT_FORMAT = '>4sHHHHIQQ'
-    
+
     @classmethod
     def create(
         cls,
@@ -105,12 +170,13 @@ class MessageHeader:
         content_length: int,
         correlation_id: int = 0,
         flags: MessageFlags = MessageFlags.NONE,
-        timestamp: Optional[int] = None
+        timestamp: Optional[int] = None,
+        sequence_id: int = 0,
+        stream_id: int = 0,
+        byte_order: ByteOrder = ByteOrder.BE,
     ) -> 'MessageHeader':
-        """Create a new message header."""
         if timestamp is None:
-            timestamp = int(time.time() * 1000)  # Milliseconds
-        
+            timestamp = int(time.time() * 1000)
         return cls(
             magic=MAGIC,
             version=PROTOCOL_VERSION,
@@ -119,35 +185,34 @@ class MessageHeader:
             reserved=0,
             content_length=content_length,
             correlation_id=correlation_id,
-            timestamp=timestamp
+            timestamp=timestamp,
+            sequence_id=sequence_id,
+            stream_id=stream_id,
+            byte_order=byte_order,
         )
-    
+
     def to_bytes(self) -> bytes:
-        """Serialize header to bytes."""
+        """Serialize to the 32-byte legacy header (always big-endian)."""
         return struct.pack(
             self.STRUCT_FORMAT,
             self.magic,
             self.version,
-            self.message_type,
-            self.flags,
+            int(self.message_type),
+            int(self.flags),
             self.reserved,
             self.content_length,
             self.correlation_id,
-            self.timestamp
+            self.timestamp,
         )
-    
+
     @classmethod
     def from_bytes(cls, data: bytes) -> 'MessageHeader':
-        """Deserialize header from bytes."""
         if len(data) < HEADER_SIZE:
             raise ValueError(f"Header too short: expected {HEADER_SIZE}, got {len(data)}")
-        
         unpacked = struct.unpack(cls.STRUCT_FORMAT, data[:HEADER_SIZE])
-        
         magic = unpacked[0]
         if magic != MAGIC:
-            raise ValueError(f"Invalid magic bytes: expected {MAGIC!r}, got {magic!r}")
-        
+            raise ValueError(f"Invalid magic: expected {MAGIC!r}, got {magic!r}")
         return cls(
             magic=magic,
             version=unpacked[1],
@@ -156,51 +221,48 @@ class MessageHeader:
             reserved=unpacked[4],
             content_length=unpacked[5],
             correlation_id=unpacked[6],
-            timestamp=unpacked[7]
+            timestamp=unpacked[7],
         )
-    
+
     def validate(self) -> None:
-        """Validate header fields."""
         if self.magic != MAGIC:
             raise ValueError(f"Invalid magic: {self.magic!r}")
-        
         if self.version != PROTOCOL_VERSION:
-            raise ValueError(f"Unsupported protocol version: {self.version:#06x}")
-        
+            raise ValueError(f"Unsupported version: {self.version:#06x}")
         if self.content_length > MAX_PAYLOAD_SIZE:
-            raise ValueError(f"Content length exceeds maximum: {self.content_length} > {MAX_PAYLOAD_SIZE}")
-    
+            raise ValueError(f"Payload too large: {self.content_length}")
+
     def is_control_message(self) -> bool:
-        """Check if this is a control message (no payload expected)."""
         return self.message_type in (
-            MessageType.HEARTBEAT_PING,
-            MessageType.HEARTBEAT_PONG,
-            MessageType.PAUSE,
-            MessageType.RESUME,
-            MessageType.ACK,
-            MessageType.NACK,
-            MessageType.CLOSE,
-            MessageType.CLOSE_ACK,
+            MessageType.HEARTBEAT_PING, MessageType.HEARTBEAT_PONG,
+            MessageType.PAUSE, MessageType.RESUME,
+            MessageType.ACK, MessageType.NACK,
+            MessageType.CLOSE, MessageType.CLOSE_ACK,
         )
-    
+
     def is_rpc(self) -> bool:
-        """Check if this is an RPC message."""
         return self.message_type in (
-            MessageType.RPC_REQUEST,
-            MessageType.RPC_RESPONSE,
-            MessageType.RPC_ERROR,
-            MessageType.RPC_LIST,
+            MessageType.RPC_REQUEST, MessageType.RPC_RESPONSE,
+            MessageType.RPC_ERROR, MessageType.RPC_LIST,
         )
-    
+
     def is_auth(self) -> bool:
-        """Check if this is an authentication message."""
         return self.message_type in (
-            MessageType.AUTH_REQUEST,
-            MessageType.AUTH_SUCCESS,
+            MessageType.AUTH_REQUEST, MessageType.AUTH_SUCCESS,
             MessageType.AUTH_FAILURE,
         )
 
+    def is_ordered(self) -> bool:
+        """True if the receiver should route through the reorder buffer."""
+        return bool(self.flags & MessageFlags.ORDERED) and self.stream_id != STREAM_UNORDERED
 
-# Verify header size is correct
+    def payload_byte_order(self) -> ByteOrder:
+        """Byte order of raw binary payload content."""
+        if self.byte_order == ByteOrder.LE or bool(self.flags & MessageFlags.BYTE_ORDER_LE):
+            return ByteOrder.LE
+        return ByteOrder.BE
+
+
+# Sanity check
 assert struct.calcsize(MessageHeader.STRUCT_FORMAT) == HEADER_SIZE, \
     f"Header struct size mismatch: {struct.calcsize(MessageHeader.STRUCT_FORMAT)} != {HEADER_SIZE}"

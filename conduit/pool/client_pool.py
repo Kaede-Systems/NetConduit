@@ -78,6 +78,7 @@ class ClientPool:
         self._latencies: Dict[int, float] = {}
         self._stats = PoolStats()
         self._lock = asyncio.Lock()
+        self._registered_handlers: Dict[str, Callable] = {}
     
     @property
     def stats(self) -> PoolStats:
@@ -107,6 +108,14 @@ class ClientPool:
                     reconnect_enabled=True,
                     **self.client_kwargs,
                 ))
+                
+                # Apply registered handlers to this client
+                for msg_type, handler in self._registered_handlers.items():
+                    client._message_router.register(
+                        message_type=msg_type,
+                        handler=lambda conn, data, h=handler: h(data),
+                        requires_auth=False,
+                    )
                 
                 try:
                     if await client.connect():
@@ -263,10 +272,11 @@ class ClientPool:
                 print(f"Got: {msg}")
         """
         def decorator(handler):
+            self._registered_handlers[message_type] = handler
             for client in self._clients:
                 client._message_router.register(
                     message_type=message_type,
-                    handler=lambda conn, data: handler(data),
+                    handler=lambda conn, data, h=handler: h(data),
                     requires_auth=False,
                 )
             return handler

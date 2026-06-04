@@ -177,8 +177,9 @@ class MessageRouter:
                 # Call handler
                 response = registered.handler(context, message.data)
                 
-                # Await if coroutine
-                if asyncio.iscoroutine(response):
+                # Await if awaitable
+                import inspect
+                if inspect.isawaitable(response):
                     response = await response
                 
                 result = response

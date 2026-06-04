@@ -39,6 +39,12 @@ class RPCError(ConduitError):
         self.code = code
         self.details = details or {}
 
+    def __str__(self) -> str:
+        if self.code:
+            return f"[{self.code}] {self.message}"
+        return self.message
+
+
 
 class ValidationError(ConduitError):
     """Data validation failed."""

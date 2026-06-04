@@ -1,17 +1,16 @@
 """
-Conduit Client
-
-The main client class for connecting to Conduit servers.
+Conduit Client using Rust QUIC transport underneath.
 """
 
 import asyncio
 import hashlib
 import time
-from typing import Any, Callable, Dict, List, Optional, Awaitable, Union
 import logging
+from typing import Any, Callable, Dict, List, Optional, Awaitable
+
+from netconduit_core import RustQUICClient, stun_punch_hole
 
 from .data.descriptors import ClientDescriptor
-from .transport import TCPSocket, ConnectionStateMachine, ConnectionState, TLSConfig, create_client_ssl_context
 from .protocol import ProtocolEncoder, ProtocolDecoder, MessageType, DecodedMessage
 from .connection import Connection
 from .messages import MessageRouter, Message
@@ -23,29 +22,12 @@ logger = logging.getLogger(__name__)
 # Callback types
 LifecycleHook = Callable[['Client'], Awaitable[None]]
 MessageHandler = Callable[[Any], Awaitable[Any]]
+BinaryStreamHandler = Callable[[str, bytes], Awaitable[None]]
 
 
 class Client:
     """
-    Conduit Client.
-    
-    Connects to a Conduit server and handles messages/RPC calls.
-    
-    Usage:
-        client = Client(ClientDescriptor(
-            server_host="localhost",
-            server_port=8080,
-            password="secret123"
-        ))
-        
-        @client.on("notification")
-        async def handle_notification(data):
-            print(f"Got notification: {data}")
-        
-        await client.connect()
-        
-        # Make RPC call
-        result = await client.rpc.call("add", args=data(a=10, b=20))
+    Conduit Client using Rust QUIC.
     """
     
     def __init__(self, config: ClientDescriptor):
@@ -56,11 +38,9 @@ class Client:
             config: Client configuration
         """
         self._config = config
-        
-        # State
-        self._state = ConnectionStateMachine()
-        self._socket: Optional[TCPSocket] = None
-        self._connection: Optional[Connection] = None
+        self._rust_client = None
+        self._connection = None
+        self._connect_lock = asyncio.Lock()
         
         # Protocol
         self._encoder = ProtocolEncoder(enable_compression=config.enable_compression)
@@ -71,42 +51,42 @@ class Client:
         
         # RPC interface
         self._rpc = RPC(self, default_timeout=config.rpc_timeout)
-        
-        # Pending RPC responses
-        self._pending_rpcs: Dict[int, asyncio.Future] = {}
+        self._pending_rpcs = {}
+        from .rpc.registry import RPCRegistry
+        from .rpc.dispatcher import RPCDispatcher
+        self._rpc_registry = RPCRegistry()
+        self._rpc_dispatcher = RPCDispatcher(self._rpc_registry)
         
         # Session info
-        self._session_token: Optional[str] = None
-        self._server_info: Dict[str, Any] = {}
+        self._session_token = None
+        self._server_info = {}
         
         # Lifecycle hooks
-        self._on_connect: List[LifecycleHook] = []
-        self._on_disconnect: List[LifecycleHook] = []
-        self._on_reconnect: List[LifecycleHook] = []
+        self._on_connect = []
+        self._on_disconnect = []
+        self._on_reconnect = []
+        self._on_binary_stream = None
+        self._on_p2p_established = None
         
         # Reconnection state
         self._reconnect_attempts = 0
         self._should_reconnect = True
+        self._connect_task = None
+        self._reconnect_task = None
+        self._auth_future = None
         
-        # Tasks
-        self._read_task: Optional[asyncio.Task] = None
-        self._write_task: Optional[asyncio.Task] = None
-        self._reconnect_task: Optional[asyncio.Task] = None
+        # Mesh network and discovery state
+        self._mesh_tunnels = {}
+        self._peer_clients = {}
+        
+        # P2P Setup
+        self._setup_p2p_handlers()
     
     # === Decorators ===
     
     def on(self, message_type: str) -> Callable:
-        """
-        Decorator to register a message handler.
-        
-        Args:
-            message_type: Type of message to handle
-            
-        Returns:
-            Decorator function
-        """
+        """Register a message handler decorator."""
         def decorator(handler: MessageHandler) -> MessageHandler:
-            # Wrap to not require connection parameter
             async def wrapper(conn, data):
                 return await handler(data)
             
@@ -132,257 +112,253 @@ class Client:
         """Register reconnect hook."""
         self._on_reconnect.append(handler)
         return handler
+        
+    def on_binary_stream(self, handler: BinaryStreamHandler) -> BinaryStreamHandler:
+        """Register binary stream callback decorator."""
+        self._on_binary_stream = handler
+        return handler
     
     # === Connection Lifecycle ===
     
     async def connect(self) -> bool:
-        """
-        Connect to the server.
-        
-        Returns:
-            True if connected successfully
-        """
-        if self._state.is_connected:
-            logger.warning("Already connected")
-            return True
-        
-        self._should_reconnect = True
-        return await self._do_connect()
+        """Connect to the server."""
+        self._connect_task = asyncio.current_task()
+        try:
+            async with self._connect_lock:
+                self._should_reconnect = True
+                return await self._do_connect()
+        finally:
+            self._connect_task = None
     
     async def _do_connect(self) -> bool:
         """Perform the actual connection."""
         try:
-            self._state.start_connecting()
-            
             logger.info(f"Connecting to {self._config.server_host}:{self._config.server_port}")
+            self._rust_client = RustQUICClient()
+            self._loop = asyncio.get_running_loop()
             
-            # Create TLS context if SSL enabled
-            ssl_context = None
-            if self._config.ssl_enabled:
-                tls_config = TLSConfig(
-                    enabled=True,
-                    cert_file=self._config.ssl_cert_file,
-                    key_file=self._config.ssl_key_file,
-                    ca_file=self._config.ssl_ca_file,
-                    verify=self._config.ssl_verify,
-                )
-                ssl_context = create_client_ssl_context(tls_config)
-                logger.info("TLS enabled for client connection")
-            
-            # Connect TCP socket
-            self._socket = await TCPSocket.connect(
-                host=self._config.server_host,
-                port=self._config.server_port,
-                timeout=self._config.connect_timeout,
-                use_ipv6=self._config.use_ipv6,
-                buffer_size=self._config.buffer_size,
-                ssl_context=ssl_context,
+            # UDP Hole Punching via STUN if server or config provides STUN server address
+            def is_loopback(h: str) -> bool:
+                hl = h.lower()
+                return hl in ("localhost", "127.0.0.1", "::1") or hl.startswith("127.")
+                
+            if not is_loopback(self._config.server_host):
+                stun_server = self._config.stun_server
+                local_port = getattr(self._config, "local_port", 0) or 0
+                peer_addr = f"{self._config.server_host}:{self._config.server_port}"
+                
+                try:
+                    logger.info(f"STUN hole punching via {stun_server} from port {local_port} to {peer_addr}")
+                    mapped = stun_punch_hole(stun_server, local_port, peer_addr)
+                    if mapped:
+                        logger.info(f"STUN mapped address successfully resolved: {mapped}")
+                except Exception as e:
+                    logger.warning(f"STUN hole punching resolution failed (normal behind symmetric NAT or local connections): {e}")
+
+            def rust_callback(event_type, client_id, data):
+                self._loop.call_soon_threadsafe(self._handle_rust_event, event_type, client_id, bytes(data))
+
+            local_port = getattr(self._config, "local_port", 0) or 0
+            connected = self._rust_client.connect(
+                self._config.server_host,
+                self._config.server_port,
+                self._config.connect_timeout,
+                rust_callback,
+                local_port
             )
-            
-            self._state.start_authenticating()
-            
-            # Authenticate
-            authenticated = await self._authenticate()
-            
-            if not authenticated:
-                self._state.mark_failed("Authentication failed")
-                await self._socket.close()
+            if not connected:
+                logger.error("Rust QUIC connection failed to connect.")
                 return False
             
-            self._state.mark_connected()
-            
-            # Create connection wrapper
             self._connection = Connection(
-                socket=self._socket,
+                rust_transport=self._rust_client,
                 encoder=self._encoder,
-                decoder=ProtocolDecoder(),
-                send_queue_size=self._config.send_queue_size,
-                receive_queue_size=self._config.receive_queue_size,
-                heartbeat_interval=self._config.heartbeat_interval,
-                heartbeat_timeout=self._config.heartbeat_timeout,
+                decoder=self._decoder
             )
             
-            # Set handlers
-            self._connection.set_message_handler(self._handle_message)
-            self._connection.set_disconnect_handler(self._handle_disconnect)
+            # Authenticate
+            self._auth_future = self._loop.create_future()
             
-            # Mark connection as authenticated (client already authenticated above)
+            password_hash = hashlib.sha256(
+                self._config.password.encode('utf-8')
+            ).hexdigest()
+            
+            client_info = {
+                "name": self._config.name,
+                "version": self._config.version,
+            }
+            if self._config.username:
+                client_info["username"] = self._config.username
+
+            auth_msg = self._encoder.encode_auth_request(
+                password_hash=password_hash,
+                client_info=client_info
+            )
+            
+            self._rust_client.send_message(auth_msg)
+            
+            auth_ok = await asyncio.wait_for(self._auth_future, timeout=self._config.connect_timeout)
+            if not auth_ok:
+                logger.error("Authentication failed.")
+                await self.disconnect()
+                return False
+            
             self._connection.mark_authenticated()
-            
-            # Start connection processing
-            await self._connection.start()
-            
-            self._state.mark_active()
             self._reconnect_attempts = 0
             
-            # Run connect hooks
             for hook in self._on_connect:
                 try:
                     await hook(self)
                 except Exception as e:
                     logger.error(f"Error in connect hook: {e}")
             
-            logger.info("Connected and authenticated")
+            logger.info("Client connected and authenticated successfully")
             return True
             
-        except asyncio.TimeoutError:
-            logger.error("Connection timeout")
-            self._state.mark_failed("Connection timeout")
-            return False
-        except OSError as e:
-            logger.error(f"Connection failed: {e}")
-            self._state.mark_failed(str(e))
-            return False
         except Exception as e:
-            logger.error(f"Connection error: {e}")
-            self._state.mark_failed(str(e))
+            logger.error(f"QUIC connection error: {e}")
             return False
-    
-    async def _authenticate(self) -> bool:
-        """Perform authentication handshake."""
-        # Send auth request
-        password_hash = hashlib.sha256(
-            self._config.password.encode('utf-8')
-        ).hexdigest()
-        
-        auth_msg = self._encoder.encode_auth_request(
-            password_hash=password_hash,
-            client_info={
-                "name": self._config.name,
-                "version": self._config.version,
-            }
-        )
-        
-        await self._socket.write(auth_msg)
-        
-        # Wait for response
-        data = await asyncio.wait_for(
-            self._socket.read(self._config.buffer_size),
-            timeout=self._config.connect_timeout
-        )
-        
-        if not data:
-            return False
-        
-        self._decoder.feed(data)
-        message = self._decoder.decode_one()
-        
-        if message is None:
-            return False
-        
-        if message.message_type == MessageType.AUTH_SUCCESS:
-            self._session_token = message.payload.get("session_token")
-            self._server_info = message.payload.get("server_info", {})
-            return True
-        
-        if message.message_type == MessageType.AUTH_FAILURE:
-            reason = message.payload.get("reason", "Unknown")
-            logger.error(f"Authentication failed: {reason}")
-            return False
-        
-        return False
-    
-    async def disconnect(self) -> None:
-        """Disconnect from the server."""
-        self._should_reconnect = False
-        
-        if self._reconnect_task:
-            self._reconnect_task.cancel()
+            
+    def _handle_rust_event(self, event_type: str, client_id: str, payload: bytes):
+        if event_type == "message":
             try:
-                await self._reconnect_task
-            except asyncio.CancelledError:
-                pass
-        
-        if self._connection:
-            await self._connection.stop()
-            self._connection = None
-        
-        if self._socket:
-            await self._socket.close()
-            self._socket = None
-        
-        self._state.mark_disconnected()
-        
-        # Run disconnect hooks
-        for hook in self._on_disconnect:
-            try:
-                await hook(self)
+                decoded = self._decoder.decode_single(payload)
+                if decoded.is_mesh and decoded.route_dst != self._config.name:
+                    asyncio.create_task(self._route_mesh_message(decoded.route_dst, payload))
+                    return
+                asyncio.create_task(self._process_message(decoded))
             except Exception as e:
-                logger.error(f"Error in disconnect hook: {e}")
-        
-        logger.info("Disconnected")
-    
-    async def _handle_disconnect(self, connection: Connection) -> None:
-        """Handle disconnection."""
-        self._state.mark_disconnected()
-        
-        # Run disconnect hooks
-        for hook in self._on_disconnect:
-            try:
-                await hook(self)
-            except Exception as e:
-                logger.error(f"Error in disconnect hook: {e}")
-        
-        # Attempt reconnection if enabled
-        if self._should_reconnect and self._config.reconnect_enabled:
-            self._reconnect_task = asyncio.create_task(self._reconnect_loop())
-    
-    async def _reconnect_loop(self) -> None:
-        """Reconnection loop with exponential backoff."""
-        delay = self._config.reconnect_delay
-        
-        while self._should_reconnect:
-            max_attempts = self._config.reconnect_attempts
-            if max_attempts > 0 and self._reconnect_attempts >= max_attempts:
-                logger.error(f"Max reconnection attempts ({max_attempts}) reached")
-                break
+                logger.error(f"Failed to decode message: {e}")
+        elif event_type == "binary_stream":
+            asyncio.create_task(self._process_binary_stream(payload))
+        elif event_type == "disconnect":
+            asyncio.create_task(self._handle_disconnect())
             
-            self._reconnect_attempts += 1
-            logger.info(f"Reconnection attempt {self._reconnect_attempts}...")
+    async def _route_mesh_message(self, dst: str, raw_payload: bytes):
+        """Zero-copy relay for mesh messages."""
+        peer = self._peer_clients.get(dst)
+        if peer:
+            if hasattr(peer, "_handle_rust_event"):
+                peer._handle_rust_event("message", self._config.name, raw_payload)
+            elif hasattr(peer, "send_raw"):
+                await peer.send_raw(raw_payload)
+            elif hasattr(peer, "send_message"):
+                if asyncio.iscoroutinefunction(peer.send_message):
+                    await peer.send_message(raw_payload)
+                else:
+                    peer.send_message(raw_payload)
+        else:
+            # If not in peer_clients, route it back to our connected server
+            if self._rust_client:
+                self._rust_client.send_message(raw_payload)
             
-            # Wait before reconnecting
-            await asyncio.sleep(delay)
+    async def _process_message(self, decoded: DecodedMessage):
+        # Check mesh routing targeting this client
+        if decoded.is_mesh and decoded.route_dst == self._config.name:
+            src = decoded.route_src
+            msg_type_str = decoded.get_message_type_str()
             
-            # Attempt connection
-            if await self._do_connect():
-                # Run reconnect hooks
-                for hook in self._on_reconnect:
-                    try:
-                        await hook(self)
-                    except Exception as e:
-                        logger.error(f"Error in reconnect hook: {e}")
+            if msg_type_str == "mesh_handshake":
+                handshake_data = decoded.get_data()
+                tunnel = self._mesh_tunnels.get(src)
+                if not tunnel:
+                    from .mesh.tunnel import MemoryTLSTunnel
+                    tunnel = MemoryTLSTunnel(is_server=True)
+                    self._mesh_tunnels[src] = tunnel
+                
+                tunnel.feed_encrypted(handshake_data)
+                completed, response_handshake = tunnel.do_handshake()
+                if response_handshake:
+                    from .protocol.protocol_pb2 import MessagePayload
+                    from .protocol.encoder import serialize_data
+                    inner_payload = MessagePayload(
+                        type="mesh_handshake",
+                        data=serialize_data(response_handshake)
+                    )
+                    response_packet = self._encoder.encode(
+                        MessageType.MESSAGE,
+                        payload_bytes=inner_payload.SerializeToString(),
+                        route_src=self._config.name,
+                        route_dst=src,
+                        is_mesh=True
+                    )
+                    await self._send_mesh_raw(src, response_packet)
                 return
-            
-            # Exponential backoff
-            delay = min(
-                delay * self._config.reconnect_delay_multiplier,
-                self._config.reconnect_delay_max
-            )
-    
-    # === Message Handling ===
-    
-    async def _handle_message(
-        self,
-        connection: Connection,
-        message: DecodedMessage
-    ) -> None:
-        """Handle incoming message."""
-        msg_type = message.message_type
+
+            elif msg_type_str == "mesh_secure":
+                encrypted_data = decoded.get_data()
+                tunnel = self._mesh_tunnels.get(src)
+                if tunnel:
+                    decrypted = tunnel.feed_encrypted(encrypted_data)
+                    inner_decoded = self._decoder.decode_single(decrypted)
+                    inner_msg_type_str = inner_decoded.get_message_type_str()
+                    inner_data = inner_decoded.get_data()
+                    
+                    logger.info(f"[Mesh Client E2E] Decrypted inner message: {inner_msg_type_str}")
+                    msg = Message(type=inner_msg_type_str, data=inner_data)
+                    await self._message_router.route(
+                        message=msg,
+                        context=self,
+                        authenticated=True
+                    )
+                return
+
+        msg_type = decoded.message_type
         
-        # Handle RPC responses
-        if msg_type in (MessageType.RPC_RESPONSE, MessageType.RPC_ERROR):
-            corr_id = message.correlation_id
-            future = self._pending_rpcs.get(corr_id)
-            
-            if future and not future.done():
-                future.set_result(message.payload)
-            
+        if msg_type == MessageType.AUTH_SUCCESS:
+            self._session_token = decoded.payload.get("session_token")
+            self._server_info = dict(decoded.payload.get("server_info", {}))
+            if self._connection:
+                self._connection.set_session(self._session_token)
+            if self._auth_future and not self._auth_future.done():
+                self._auth_future.set_result(True)
             return
-        
-        # Handle regular messages
+
+        if msg_type == MessageType.AUTH_FAILURE:
+            if self._auth_future and not self._auth_future.done():
+                self._auth_future.set_result(False)
+            return
+
+        # Handle RPC requests (for P2P connections)
+        if msg_type == MessageType.RPC_REQUEST:
+            method = decoded.get_rpc_method()
+            params = decoded.get_rpc_params() or {}
+            corr_id = decoded.correlation_id
+            
+            response = await self._rpc_dispatcher.dispatch(
+                method=method,
+                params=params,
+                authenticated=True
+            )
+            if response.get("success", False):
+                res_val = response.get("result") if "result" in response else response.get("data")
+                await self._connection.send_rpc_response(res_val, corr_id)
+            else:
+                await self._connection.send_rpc_error(
+                    response.get("error", "Unknown RPC error"),
+                    corr_id,
+                    code=response.get("code")
+                )
+            return
+
+        # Direct RPC interception on the connection
+        if self._connection:
+            intercepted = self._connection.handle_decoded_message(decoded)
+            if intercepted:
+                return
+
+        # Fallback RPC future resolution
+        if msg_type in (MessageType.RPC_RESPONSE, MessageType.RPC_ERROR):
+            corr_id = decoded.correlation_id
+            future = self._pending_rpcs.get(corr_id)
+            if future and not future.done():
+                future.set_result(decoded.payload)
+            return
+
+        # Route standard messages
         if msg_type == MessageType.MESSAGE:
-            msg_type_str = message.get_message_type_str()
-            data = message.get_data()
+            msg_type_str = decoded.get_message_type_str()
+            data = decoded.get_data()
             
             msg = Message(type=msg_type_str, data=data)
             await self._message_router.route(
@@ -390,92 +366,475 @@ class Client:
                 context=self,
                 authenticated=True,
             )
-    
-    # === Sending ===
-    
+            
+    async def _process_binary_stream(self, payload: bytes):
+        if len(payload) < 4:
+            return
+        name_len = int.from_bytes(payload[:4], byteorder='big')
+        if len(payload) < 4 + name_len:
+            return
+        stream_name = payload[4:4+name_len].decode('utf-8')
+        data = payload[4+name_len:]
+        if self._on_binary_stream:
+            try:
+                await self._on_binary_stream(stream_name, data)
+            except Exception as e:
+                logger.error(f"Error in binary stream handler: {e}")
+                
+    async def _handle_disconnect(self):
+        logger.info("Disconnected from server")
+        if self._auth_future and not self._auth_future.done():
+            self._auth_future.set_result(False)
+        was_connected = self._connection is not None
+        if self._connection:
+            await self._connection.stop()
+            self._connection = None
+            
+        if was_connected:
+            for hook in self._on_disconnect:
+                try:
+                    await hook(self)
+                except Exception as e:
+                    logger.error(f"Error in disconnect hook: {e}")
+                
+        if self._should_reconnect and self._config.reconnect_enabled:
+            if not self._reconnect_task or self._reconnect_task.done():
+                self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+                
+    async def _reconnect_loop(self):
+        delay = self._config.reconnect_delay
+        while self._should_reconnect:
+            max_attempts = self._config.reconnect_attempts
+            if max_attempts > 0 and self._reconnect_attempts >= max_attempts:
+                logger.error(f"Max reconnection attempts ({max_attempts}) reached")
+                break
+                
+            self._reconnect_attempts += 1
+            logger.info(f"Reconnecting attempt {self._reconnect_attempts}...")
+            await asyncio.sleep(delay)
+            if await self._do_connect():
+                for hook in self._on_reconnect:
+                    try:
+                        await hook(self)
+                    except Exception as e:
+                        logger.error(f"Error in reconnect hook: {e}")
+                return
+            delay = min(delay * self._config.reconnect_delay_multiplier, self._config.reconnect_delay_max)
+            
+    async def disconnect(self) -> None:
+        """Disconnect client."""
+        was_connected = self._connection is not None
+        self._should_reconnect = False
+        if self._connect_task and not self._connect_task.done():
+            self._connect_task.cancel()
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            
+        # Close any local P2P servers
+        for request_id, server_info in list(self._p2p_servers.items()):
+            try:
+                local_server, _ = server_info
+                await local_server.stop()
+            except Exception:
+                pass
+        self._p2p_servers.clear()
+        
+        # Cancel any pending P2P futures
+        for fut in list(self._p2p_futures.values()):
+            if not fut.done():
+                fut.cancel()
+        self._p2p_futures.clear()
+
+        if self._rust_client:
+            self._rust_client.disconnect()
+            self._rust_client = None
+        if self._connection:
+            await self._connection.stop()
+            self._connection = None
+            
+        logger.info("Disconnected client")
+        if was_connected:
+            for hook in self._on_disconnect:
+                try:
+                    await hook(self)
+                except Exception as e:
+                    logger.error(f"Error in disconnect hook: {e}")
+        
     async def send(self, message_type: str, data: Any) -> None:
-        """
-        Send a message to the server.
-        
-        Args:
-            message_type: Message type
-            data: Message data
-        """
-        if not self._connection or not self._state.is_connected:
+        """Send message."""
+        if not self._connection:
             raise ConnectionError("Not connected")
-        
         await self._connection.send_message(message_type, data)
-    
+        
+    def send_binary_stream(self, stream_name: str, data: bytes):
+        """Stream direct binary data to the server using QUIC stream."""
+        if not self._rust_client:
+            raise ConnectionError("Not connected")
+        self._rust_client.send_binary_stream(stream_name, data)
+        
+    async def establish_mesh_tunnel(self, target_node_id: str) -> None:
+        """Establish an end-to-end encrypted TLS tunnel to a target node (Client or Server)."""
+        from .mesh.tunnel import MemoryTLSTunnel
+        
+        # We are the client side of the E2E TLS tunnel
+        tunnel = MemoryTLSTunnel(is_server=False)
+        self._mesh_tunnels[target_node_id] = tunnel
+        
+        completed, handshake_data = tunnel.do_handshake()
+        if handshake_data:
+            from .protocol.protocol_pb2 import MessagePayload
+            from .protocol.encoder import serialize_data
+            inner_payload = MessagePayload(
+                type="mesh_handshake",
+                data=serialize_data(handshake_data)
+            )
+            packet = self._encoder.encode(
+                MessageType.MESSAGE,
+                payload_bytes=inner_payload.SerializeToString(),
+                route_src=self._config.name,
+                route_dst=target_node_id,
+                is_mesh=True
+            )
+            await self._send_mesh_raw(target_node_id, packet)
+            
+        # Wait until the handshake is complete
+        for _ in range(50):
+            if tunnel.handshake_done:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise TimeoutError(f"Mesh TLS handshake with {target_node_id} timed out")
+
+    async def send_mesh_secure_message(self, target_node_id: str, message_type: str, data: Any) -> None:
+        """Send an end-to-end encrypted message via mesh network."""
+        tunnel = self._mesh_tunnels.get(target_node_id)
+        if not tunnel or not tunnel.handshake_done:
+            await self.establish_mesh_tunnel(target_node_id)
+            tunnel = self._mesh_tunnels.get(target_node_id)
+            if not tunnel or not tunnel.handshake_done:
+                raise RuntimeError(f"Could not establish mesh tunnel to {target_node_id}")
+                
+        # Encode the inner message
+        inner_encoded = self._encoder.encode_message(message_type, data)
+        # Encrypt with TLS tunnel
+        encrypted_payload = tunnel.write_plaintext(inner_encoded)
+        # Wrap in a secure mesh packet
+        from .protocol.protocol_pb2 import MessagePayload
+        from .protocol.encoder import serialize_data
+        inner_payload = MessagePayload(
+            type="mesh_secure",
+            data=serialize_data(encrypted_payload)
+        )
+        packet = self._encoder.encode(
+            MessageType.MESSAGE,
+            payload_bytes=inner_payload.SerializeToString(),
+            route_src=self._config.name,
+            route_dst=target_node_id,
+            is_mesh=True
+        )
+        await self._send_mesh_raw(target_node_id, packet)
+
+    async def _send_mesh_raw(self, target_node_id: str, packet: bytes):
+        """Send raw packet to next hop towards target_node_id."""
+        peer = self._peer_clients.get(target_node_id)
+        if peer:
+            if hasattr(peer, "_handle_rust_event"):
+                peer._handle_rust_event("message", self._config.name, packet)
+            elif hasattr(peer, "send_raw"):
+                await peer.send_raw(packet)
+            elif hasattr(peer, "send_message"):
+                if asyncio.iscoroutinefunction(peer.send_message):
+                    await peer.send_message(packet)
+                else:
+                    peer.send_message(packet)
+        else:
+            # Send to the server
+            if not self._connection:
+                raise ConnectionError("Not connected to server")
+            await self._connection.send_raw(packet)
+
+    async def discover_peers(self, timeout: float = 1.5, remote_hosts: Optional[List[str]] = None) -> List[dict]:
+        """Discover active servers on local multicast and optional list of remote hosts."""
+        from .discovery.mdns import DiscoveryService
+        return await DiscoveryService.discover(timeout=timeout, remote_hosts=remote_hosts)
+        
     async def _send_rpc_request(self, method: str, params: dict) -> int:
-        """
-        Internal method to send RPC request.
-        
-        Returns:
-            Correlation ID
-        """
         if not self._connection:
             raise ConnectionError("Not connected")
+        return await self._connection.send_rpc_request(method, params)
         
-        # Send request - Connection handles the pending RPC tracking
-        corr_id = await self._connection.send_rpc_request(method, params)
-        return corr_id
-    
     async def _wait_for_rpc_response(self, correlation_id: int) -> Any:
-        """
-        Internal method to wait for RPC response.
-        
-        Returns:
-            Response payload
-        """
         if not self._connection:
             raise ConnectionError("Not connected")
-        
-        # Use Connection's RPC response waiting
         return await self._connection.wait_for_rpc_response(correlation_id)
-    
-    # === Properties ===
-    
+        
     @property
     def is_connected(self) -> bool:
-        """Check if connected."""
-        return self._state.is_connected
-    
+        return self._connection is not None
+        
     @property
     def is_authenticated(self) -> bool:
-        """Check if authenticated."""
         return self._session_token is not None
-    
+        
     @property
-    def state(self) -> ConnectionState:
-        """Get connection state."""
-        return self._state.state
-    
+    def state(self) -> Any:
+        from .transport import ConnectionState
+        return ConnectionState.ACTIVE if self.is_connected else ConnectionState.DISCONNECTED
+        
     @property
     def rpc(self) -> RPC:
-        """Get RPC interface."""
         return self._rpc
-    
+        
     @property
     def config(self) -> ClientDescriptor:
-        """Get client configuration."""
         return self._config
-    
+        
     @property
     def server_info(self) -> Dict[str, Any]:
-        """Get server info from authentication."""
         return self._server_info
-    
+        
     @property
     def session_token(self) -> Optional[str]:
-        """Get session token."""
         return self._session_token
-    
+        
     def health(self) -> dict:
-        """Get connection health info."""
         return {
-            "connected": self._state.is_connected,
-            "state": self._state.state.name,
+            "connected": self.is_connected,
+            "state": self.state.name if hasattr(self.state, "name") else str(self.state),
             "authenticated": self.is_authenticated,
             "reconnect_attempts": self._reconnect_attempts,
             "server_info": self._server_info,
         }
+
+    # === P2P Decorators and Helpers ===
+
+    def on_p2p_request(self, handler: Callable[[str], Awaitable[bool]]) -> Callable:
+        """Register P2P request authorization handler."""
+        self._p2p_handler = handler
+        return handler
+        
+    def on_p2p_established(self, handler: Callable[['Client'], Awaitable[None]]) -> Callable:
+        """Register P2P connection established callback."""
+        self._on_p2p_established = handler
+        return handler
+
+    def _get_free_port(self) -> int:
+        """Get a free port on localhost."""
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            return s.getsockname()[1]
+
+    async def establish_p2p(self, target_client_id: str, timeout: float = 20.0) -> 'Client':
+        """
+        Establish a direct peer-to-peer connection to another client.
+        
+        Args:
+            target_client_id: Name/ID of target client
+            timeout: Timeout in seconds
+            
+        Returns:
+            Connected Client instance pointing directly to the peer
+        """
+        import uuid
+        if not self.is_connected:
+            raise ConnectionError("Must be connected to server to broker P2P connection")
+            
+        request_id = str(uuid.uuid4())
+        future = self._loop.create_future()
+        self._p2p_futures[request_id] = future
+        
+        # 1. Send p2p broker request to server
+        await self.send("p2p_request", {
+            "target_id": target_client_id,
+            "request_id": request_id,
+        })
+        
+        try:
+            # 2. Wait for response from server/target
+            response = await asyncio.wait_for(future, timeout=timeout)
+            if not response.get("accepted"):
+                raise ConnectionError(f"P2P connection rejected by {target_client_id}: {response.get('reason', 'Access Denied')}")
+                
+            target_addr = response.get("public_addr")
+            
+            # 3. Setup local punch socket port
+            local_port = self._get_free_port()
+            stun_server = self._config.stun_server
+            
+            # 4. Perform STUN mapping on local_port
+            try:
+                public_addr = stun_punch_hole(stun_server, local_port, "")
+            except Exception:
+                public_addr = ""
+            if not public_addr:
+                public_addr = f"127.0.0.1:{local_port}"
+                
+            # 5. Tell the target to punch towards our public address
+            await self.send("p2p_punch_source", {
+                "request_id": request_id,
+                "source_addr": public_addr,
+                "target_id": target_client_id,
+            })
+            
+            # Small delay to let message route and target perform its punch
+            await asyncio.sleep(0.2)
+            
+            # 6. Perform our punch towards target's address
+            try:
+                logger.info(f"P2P Punching from initiator port {local_port} to {target_addr}")
+                stun_punch_hole(stun_server, local_port, target_addr)
+            except Exception as e:
+                logger.warning(f"P2P Punching from initiator failed: {e}")
+                
+            await asyncio.sleep(0.1)
+            
+            # 7. Connect directly to target!
+            host, port_str = target_addr.split(":")
+            port = int(port_str)
+            
+            from conduit import ClientDescriptor
+            peer_client = Client(ClientDescriptor(
+                server_host=host,
+                server_port=port,
+                password=self._config.password,
+                local_port=local_port,
+                reconnect_enabled=False,
+                name=f"{self._config.name}_to_{target_client_id}",
+            ))
+            
+            connected = await peer_client.connect()
+            if not connected:
+                raise ConnectionError(f"Failed to connect to peer at {target_addr}")
+                
+            return peer_client
+            
+        finally:
+            self._p2p_futures.pop(request_id, None)
+
+    def _setup_p2p_handlers(self) -> None:
+        """Set up built-in P2P message handlers."""
+        self._p2p_handler = None
+        self._p2p_servers = {}
+        self._p2p_futures = {}
+        
+        async def handle_p2p_incoming(connection, data):
+            import inspect
+            source_id = data.get("source_id")
+            source_addr = data.get("source_addr")
+            request_id = data.get("request_id")
+            
+            accepted = True
+            if self._p2p_handler:
+                try:
+                    accepted = self._p2p_handler(source_id)
+                    if inspect.isawaitable(accepted):
+                        accepted = await accepted
+                except Exception as e:
+                    logger.error(f"Error in p2p handler: {e}")
+                    accepted = False
+            
+            if not accepted:
+                await self.send("p2p_accept", {
+                    "request_id": request_id,
+                    "accepted": False,
+                    "reason": "Connection request rejected by peer",
+                })
+                return
+            
+            try:
+                local_port = self._get_free_port()
+                from conduit import Server, ServerDescriptor
+                
+                local_server = Server(ServerDescriptor(
+                    name=f"{self._config.name}_p2p_{request_id[:8]}",
+                    host="0.0.0.0",
+                    port=local_port,
+                    password=self._config.password,
+                    enable_compression=self._config.enable_compression,
+                ))
+                
+                connection_future = asyncio.get_running_loop().create_future()
+                
+                @local_server.on_client_connect
+                async def handle_p2p_client_connect(conn):
+                    if not connection_future.done():
+                        connection_future.set_result(conn)
+                
+                await local_server.start()
+                self._p2p_servers[request_id] = (local_server, connection_future)
+                
+                stun_server = self._config.stun_server
+                try:
+                    public_addr = stun_punch_hole(stun_server, local_port, "")
+                except Exception:
+                    public_addr = ""
+                    
+                if not public_addr:
+                    public_addr = f"127.0.0.1:{local_port}"
+                
+                await self.send("p2p_accept", {
+                    "request_id": request_id,
+                    "accepted": True,
+                    "public_addr": public_addr,
+                })
+                
+                # Wait for connection in background
+                async def wait_for_peer_conn():
+                    try:
+                        conn = await connection_future
+                        # Wrap as Client
+                        peer_client = Client(ClientDescriptor(
+                            server_host=conn.remote_address,
+                            server_port=local_port,
+                            password=self._config.password,
+                        ))
+                        peer_client._connection = conn
+                        peer_client._session_token = "p2p"
+                        
+                        # Redirect routing
+                        local_server._message_router = peer_client._message_router
+                        local_server._rpc_registry = peer_client._rpc_registry
+                        local_server._rpc_dispatcher = peer_client._rpc_dispatcher
+                        
+                        if self._on_p2p_established:
+                            res = self._on_p2p_established(peer_client)
+                            if inspect.isawaitable(res):
+                                await res
+                    except Exception as e:
+                        logger.error(f"Error establishing peer connection: {e}")
+                        
+                asyncio.create_task(wait_for_peer_conn())
+                
+            except Exception as e:
+                logger.error(f"Failed to setup local P2P server: {e}")
+                await self.send("p2p_accept", {
+                    "request_id": request_id,
+                    "accepted": False,
+                    "reason": str(e),
+                })
+
+        async def handle_p2p_punch_cmd(connection, data):
+            request_id = data.get("request_id")
+            source_addr = data.get("source_addr")
+            
+            server_info = self._p2p_servers.get(request_id)
+            if server_info:
+                local_server, _ = server_info
+                local_port = local_server._config.port
+                stun_server = self._config.stun_server
+                try:
+                    logger.info(f"P2P Punching from listener port {local_port} to {source_addr}")
+                    stun_punch_hole(stun_server, local_port, source_addr)
+                except Exception as e:
+                    logger.warning(f"P2P Punching from listener failed: {e}")
+
+        async def handle_p2p_request_response(connection, data):
+            request_id = data.get("request_id")
+            future = self._p2p_futures.get(request_id)
+            if future and not future.done():
+                future.set_result(data)
+
+        self._message_router.register("p2p_incoming", handle_p2p_incoming, requires_auth=False)
+        self._message_router.register("p2p_punch_cmd", handle_p2p_punch_cmd, requires_auth=False)
+        self._message_router.register("p2p_request_response", handle_p2p_request_response, requires_auth=False)

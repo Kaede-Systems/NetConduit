@@ -165,10 +165,12 @@ class ConnectionPool:
     async def close_all(self) -> None:
         """Close all connections."""
         async with self._lock:
-            tasks = [conn.stop() for conn in self._connections.values()]
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            conns = list(self._connections.values())
             self._connections.clear()
+            
+        if conns:
+            tasks = [conn.stop() for conn in conns]
+            await asyncio.gather(*tasks, return_exceptions=True)
     
     @property
     def count(self) -> int:

@@ -25,6 +25,7 @@ class ServerDescriptor(BaseModel):
     host: str = Field(default="0.0.0.0", description="Host address to bind to")
     port: int = Field(default=8080, ge=1, le=65535, description="Port to listen on")
     ipv6: bool = Field(default=False, description="Enable IPv6 support")
+    stun_server: str = Field(default="stun.l.google.com:19302", description="Public STUN server address")
     
     # Authentication
     password: str = Field(..., min_length=1, description="Password for client authentication")
@@ -164,9 +165,17 @@ class ClientDescriptor(BaseModel):
     name: str = Field(default="conduit_client", description="Client name for identification")
     version: str = Field(default="1.0.0", description="Client version")
     description: str = Field(default="", description="Client description")
+    username: Optional[str] = Field(default=None, description="Username for authentication")
     
     # Network
     use_ipv6: bool = Field(default=False, description="Use IPv6 for connection")
+    local_port: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=65535,
+        description="Local port to bind to (optional)"
+    )
+    stun_server: str = Field(default="stun.l.google.com:19302", description="Public STUN server address")
     
     # Connection behavior
     connect_timeout: int = Field(

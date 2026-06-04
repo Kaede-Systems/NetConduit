@@ -93,11 +93,3 @@ def create_client_ssl_context(config: TLSConfig) -> Optional[ssl.SSLContext]:
     return context
 
 
-def wrap_server_socket(sock, ssl_context: ssl.SSLContext):
-    """Wrap accepted socket with TLS."""
-    return ssl_context.wrap_socket(sock, server_side=True)
-
-
-def wrap_client_socket(sock, ssl_context: ssl.SSLContext, server_hostname: str):
-    """Wrap client socket with TLS."""
-    return ssl_context.wrap_socket(sock, server_hostname=server_hostname)

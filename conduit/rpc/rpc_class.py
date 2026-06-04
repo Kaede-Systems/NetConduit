@@ -12,19 +12,7 @@ if TYPE_CHECKING:
     from ..client import Client
 
 
-class RPCError(Exception):
-    """Exception raised when an RPC call fails."""
-    
-    def __init__(self, message: str, code: Optional[int] = None, details: Optional[Dict] = None):
-        super().__init__(message)
-        self.message = message
-        self.code = code
-        self.details = details or {}
-    
-    def __str__(self) -> str:
-        if self.code:
-            return f"[{self.code}] {self.message}"
-        return self.message
+from ..exceptions import RPCError
 
 
 class RPCTimeout(RPCError):
@@ -194,3 +182,16 @@ class RPC:
         if value <= 0:
             raise ValueError("Timeout must be positive")
         self._default_timeout = value
+
+    def __call__(self, name: Optional[Any] = None) -> Any:
+        """Register an RPC method on the client (for P2P connection use)."""
+        if callable(name):
+            handler = name
+            self._client._rpc_registry.register(handler)
+            return handler
+        
+        def decorator(handler: Any) -> Any:
+            self._client._rpc_registry.register(handler, name=name)
+            return handler
+        return decorator
+
