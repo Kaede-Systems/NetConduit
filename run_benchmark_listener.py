@@ -56,6 +56,12 @@ async def main():
         @peer_client.rpc("stop_benchmark")
         async def stop_benchmark() -> dict:
             nonlocal bench_active, received_chunks, received_bytes, start_time, end_time
+            # Wait up to 10 seconds for all chunks to arrive
+            for _ in range(100):
+                if received_chunks >= expected_chunks:
+                    break
+                await asyncio.sleep(0.1)
+                
             end_time = time.perf_counter()
             bench_active = False
             duration = end_time - start_time
