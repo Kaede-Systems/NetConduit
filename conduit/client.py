@@ -771,7 +771,6 @@ class Client:
                     if not connection_future.done():
                         connection_future.set_result(conn)
                 
-                await local_server.start()
                 self._p2p_servers[request_id] = (local_server, connection_future)
                 
                 stun_server = self._config.stun_server
@@ -838,6 +837,11 @@ class Client:
                     stun_punch_hole(stun_server, local_port, source_addr)
                 except Exception as e:
                     logger.warning(f"P2P Punching from listener failed: {e}")
+                
+                try:
+                    await local_server.start()
+                except Exception as e:
+                    logger.error(f"Failed to start local P2P server after punch: {e}")
 
         async def handle_p2p_request_response(connection, data):
             request_id = data.get("request_id")
