@@ -624,6 +624,34 @@ fn make_transport_config(idle_secs: u64, keepalive_secs: u64) -> Arc<quinn::Tran
 const MAX_MSG_SIZE:   usize = 10 * 1024 * 1024;
 const MAX_STREAM_SIZE: usize = 100 * 1024 * 1024;
 
+fn decompress_stream_payload(buf: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    if buf.len() < 4 {
+        anyhow::bail!("Buffer too short");
+    }
+    let name_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if buf.len() < 4 + name_len + 1 {
+        anyhow::bail!("Buffer missing codec id or payload");
+    }
+    let codec = buf[4 + name_len];
+    let compressed = &buf[4 + name_len + 1..];
+    let decompressed = match codec {
+        CODEC_NONE => compressed.to_vec(),
+        CODEC_LZ4 => {
+            lz4_flex::decompress_size_prepended(compressed)
+                .map_err(|e| anyhow::anyhow!("LZ4 decompression failed: {}", e))?
+        }
+        CODEC_ZSTD => {
+            zstd::decode_all(compressed)
+                .map_err(|e| anyhow::anyhow!("Zstd decompression failed: {}", e))?
+        }
+        other => anyhow::bail!("Unknown codec: {}", other),
+    };
+    let mut out = Vec::with_capacity(4 + name_len + decompressed.len());
+    out.extend_from_slice(&buf[0..4 + name_len]);
+    out.extend_from_slice(&decompressed);
+    Ok(out)
+}
+
 // ─── QUIC Server ──────────────────────────────────────────────────────────────
 
 #[pyclass]
@@ -738,7 +766,9 @@ impl RustQUICServer {
                                             tokio::spawn(async move {
                                                 if let Ok(buf) = recv.read_to_end(MAX_STREAM_SIZE).await {
                                                     if !buf.is_empty() {
-                                                        let _ = tx.send(("binary_stream".into(), cid, buf)).await;
+                                                        if let Ok(decompressed) = decompress_stream_payload(buf) {
+                                                            let _ = tx.send(("binary_stream".into(), cid, decompressed)).await;
+                                                        }
                                                     }
                                                 }
                                             });
@@ -792,7 +822,27 @@ impl RustQUICServer {
                         let name = stream_name.as_bytes();
                         let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
                         let _ = send.write_all(name).await;
-                        let _ = send.write_all(&data).await;
+                        
+                        let codec = select_codec(&data);
+                        let (final_codec, payload_to_send) = if codec == CODEC_NONE {
+                            (CODEC_NONE, data)
+                        } else {
+                            let compressed = match codec {
+                                CODEC_LZ4 => lz4_flex::compress_prepend_size(&data),
+                                _ => {
+                                    let level = if data.len() >= THRESHOLD_ZSTD_FAST { 3 } else { 1 };
+                                    zstd::encode_all(&data[..], level).unwrap_or_else(|_| data.clone())
+                                }
+                            };
+                            if compressed.len() < data.len() {
+                                (codec, compressed)
+                            } else {
+                                (CODEC_NONE, data)
+                            }
+                        };
+                        
+                        let _ = send.write_all(&[final_codec]).await;
+                        let _ = send.write_all(&payload_to_send).await;
                         let _ = send.finish();
                     }
                 });
@@ -916,7 +966,9 @@ impl RustQUICClient {
                                     tokio::spawn(async move {
                                         if let Ok(buf) = recv.read_to_end(MAX_STREAM_SIZE).await {
                                             if !buf.is_empty() {
-                                                let _ = tx.send(("binary_stream".into(), "".into(), buf)).await;
+                                                if let Ok(decompressed) = decompress_stream_payload(buf) {
+                                                    let _ = tx.send(("binary_stream".into(), "".into(), decompressed)).await;
+                                                }
                                             }
                                         }
                                     });
@@ -975,7 +1027,27 @@ impl RustQUICClient {
                         let name = stream_name.as_bytes();
                         let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
                         let _ = send.write_all(name).await;
-                        let _ = send.write_all(&data).await;
+                        
+                        let codec = select_codec(&data);
+                        let (final_codec, payload_to_send) = if codec == CODEC_NONE {
+                            (CODEC_NONE, data)
+                        } else {
+                            let compressed = match codec {
+                                CODEC_LZ4 => lz4_flex::compress_prepend_size(&data),
+                                _ => {
+                                    let level = if data.len() >= THRESHOLD_ZSTD_FAST { 3 } else { 1 };
+                                    zstd::encode_all(&data[..], level).unwrap_or_else(|_| data.clone())
+                                }
+                            };
+                            if compressed.len() < data.len() {
+                                (codec, compressed)
+                            } else {
+                                (CODEC_NONE, data)
+                            }
+                        };
+                        
+                        let _ = send.write_all(&[final_codec]).await;
+                        let _ = send.write_all(&payload_to_send).await;
                         let _ = send.finish();
                     }
                 });
