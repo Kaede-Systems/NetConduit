@@ -1,10 +1,10 @@
 [package]
-name = "netconduit_core"
+name = "netconduit"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "netconduit_core"
+name = "netconduit"
 # cdylib  = needed for Python (maturin) and Flutter (frb generates its own cdylib)
 # staticlib = needed for iOS static linking
 # rlib    = needed for downstream Rust crates

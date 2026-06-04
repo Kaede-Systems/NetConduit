@@ -16,7 +16,7 @@ Developed by **Kaede Dev - Kento Hinode**
 │              Application Layer                      │
 │     Flutter (FFI)    Python (PyO3)    Rust crate    │
 ├─────────────────────────────────────────────────────┤
-│               netconduit_core (Rust)                │
+│                  netconduit  (Rust)                  │
 │  ConduitServer / ConduitClient / ConduitDuplexStream│
 │  Mesh routing · ResourcePool · Ed25519 security     │
 ├─────────────────────────────────────────────────────┤
@@ -67,7 +67,7 @@ Developed by **Kaede Dev - Kento Hinode**
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitServer, ConduitEvent};
+use netconduit::core::{ConduitServer, ConduitEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitClient, ConduitEvent};
+use netconduit::core::{ConduitClient, ConduitEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -125,9 +125,9 @@ stream.close().await?;
 ### Signed Messages (Ed25519)
 
 ```rust
-use netconduit_core::security::{NodeIdentity, sign_packet, KeyStore};
-use netconduit_core::protocol::Packet;
-use netconduit_core::core::PROTO_VERSION;
+use netconduit::security::{NodeIdentity, sign_packet, KeyStore};
+use netconduit::protocol::Packet;
+use netconduit::core::PROTO_VERSION;
 
 let identity = NodeIdentity::generate()?;
 let mut pkt = Packet { version: PROTO_VERSION, payload: b"secure".to_vec(), ..Default::default() };
@@ -142,8 +142,8 @@ assert!(store.verify(&pkt));
 
 ```rust
 // Set dst_id to route through the server to another peer
-use netconduit_core::core::MESH_DEFAULT_TTL;
-use netconduit_core::protocol::Packet;
+use netconduit::core::MESH_DEFAULT_TTL;
+use netconduit::protocol::Packet;
 
 let mut pkt = Packet {
     dst_id: "target_peer_id_here".to_string(),
@@ -159,7 +159,7 @@ let mut pkt = Packet {
 ## Project Layout
 
 ```
-netconduit_core/        Rust library crate
+netconduit_core/        Rust crate (pip: netconduit, import: netconduit)
   src/
     core.rs             Server, Client, DuplexStream, ResourcePool, compression
     security.rs         Ed25519 NodeIdentity, KeyStore, sign/verify helpers

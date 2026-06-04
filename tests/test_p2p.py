@@ -111,7 +111,7 @@ async def test_p2p_direct_connection():
         await broker_server.stop()
 
 def test_stun_dns_resolution():
-    from netconduit_core import stun_punch_hole
+    from netconduit import stun_punch_hole
     # Calling stun_punch_hole with a DNS hostname should not raise value error
     try:
         res = stun_punch_hole("stun.l.google.com:19302", 0, "")

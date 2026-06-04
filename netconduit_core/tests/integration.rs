@@ -3,11 +3,11 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use netconduit_core::core::{
+use netconduit::core::{
     ConduitClient, ConduitServer, ConduitEvent,
     ChannelConfig, METRICS, metrics_snapshot, ResourcePool,
 };
-use netconduit_core::security::{NodeIdentity, sign_packet, verify_packet, KeyStore};
+use netconduit::security::{NodeIdentity, sign_packet, verify_packet, KeyStore};
 use std::sync::atomic::Ordering;
 
 fn install_crypto_provider() {
@@ -15,7 +15,7 @@ fn install_crypto_provider() {
     ONCE.get_or_init(|| { let _ = rustls::crypto::aws_lc_rs::default_provider().install_default(); });
 }
 
-extern crate netconduit_core;
+extern crate netconduit;
 extern crate rustls;
 
 fn free_port() -> u16 {
@@ -291,7 +291,7 @@ async fn connect_pinned_correct_cert_succeeds() {
 #[tokio::test]
 async fn connect_pinned_wrong_cert_fails() {
     let (server, port, _) = start_test_server().await;
-    let (wrong, _, _) = netconduit_core::core::generate_self_signed_cert().unwrap();
+    let (wrong, _, _) = netconduit::core::generate_self_signed_cert().unwrap();
     let (tx, _) = mpsc::channel(1);
     let result = tokio::time::timeout(Duration::from_secs(3),
         ConduitClient::connect_pinned("127.0.0.1", port, 2, tx, None, wrong.as_ref().to_vec())
@@ -490,8 +490,8 @@ async fn duplex_stream_name_matches_channel() {
 
 #[tokio::test]
 async fn mesh_message_forwarded_between_clients() {
-    use netconduit_core::core::{PROTO_VERSION, frame_packet};
-    use netconduit_core::protocol::{Packet, PacketType};
+    use netconduit::core::{PROTO_VERSION, frame_packet};
+    use netconduit::protocol::{Packet, PacketType};
 
     let (server, port, mut srv_rx) = start_test_server().await;
     let (client_a, _ra) = connect_test_client(port).await;
@@ -530,8 +530,8 @@ async fn mesh_message_forwarded_between_clients() {
 
 #[tokio::test]
 async fn mesh_ttl_zero_packet_dropped() {
-    use netconduit_core::core::{PROTO_VERSION, frame_packet};
-    use netconduit_core::protocol::{Packet, PacketType};
+    use netconduit::core::{PROTO_VERSION, frame_packet};
+    use netconduit::protocol::{Packet, PacketType};
 
     let (server, port, mut srv_rx) = start_test_server().await;
     let (client_a, _ra) = connect_test_client(port).await;
@@ -563,8 +563,8 @@ async fn mesh_ttl_zero_packet_dropped() {
 
 #[tokio::test]
 async fn mesh_forwards_count_increments() {
-    use netconduit_core::core::{PROTO_VERSION, frame_packet};
-    use netconduit_core::protocol::{Packet, PacketType};
+    use netconduit::core::{PROTO_VERSION, frame_packet};
+    use netconduit::protocol::{Packet, PacketType};
 
     let (server, port, mut srv_rx) = start_test_server().await;
     let (client_a, _ra) = connect_test_client(port).await;
@@ -597,8 +597,8 @@ async fn mesh_forwards_count_increments() {
 
 #[tokio::test]
 async fn signed_message_verified_by_receiver() {
-    use netconduit_core::core::{PROTO_VERSION, frame_packet};
-    use netconduit_core::protocol::{Packet, PacketType};
+    use netconduit::core::{PROTO_VERSION, frame_packet};
+    use netconduit::protocol::{Packet, PacketType};
 
     let (server, port, mut srv_rx) = start_test_server().await;
     let (client, _) = connect_test_client(port).await;
@@ -637,8 +637,8 @@ async fn signed_message_verified_by_receiver() {
 
 #[tokio::test]
 async fn key_store_rejects_tampered_packet() {
-    use netconduit_core::core::PROTO_VERSION;
-    use netconduit_core::protocol::{Packet, PacketType};
+    use netconduit::core::PROTO_VERSION;
+    use netconduit::protocol::{Packet, PacketType};
 
     let identity = NodeIdentity::generate().unwrap();
     let store = KeyStore::new();

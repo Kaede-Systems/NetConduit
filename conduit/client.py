@@ -8,7 +8,7 @@ import time
 import logging
 from typing import Any, Callable, Dict, List, Optional, Awaitable
 
-from netconduit_core import RustQUICClient, stun_punch_hole
+from netconduit import RustQUICClient, stun_punch_hole
 
 from .data.descriptors import ClientDescriptor
 from .protocol import ProtocolEncoder, ProtocolDecoder, MessageType, DecodedMessage

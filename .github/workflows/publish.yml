@@ -1,8 +1,8 @@
-name: Build & Publish to PyPI
+name: Build & Publish
 
 # Triggers:
-#   push a version tag (v4.0.0) → full build + publish
-#   manual dispatch → build only (no publish unless explicitly opted in)
+#   push a version tag (v4.0.0) → build all + publish PyPI + crates.io + pub.dev
+#   manual dispatch → build only (no publish unless opted in)
 on:
   push:
     tags:
@@ -10,30 +10,27 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 'Publish to PyPI (true/false)'
+        description: 'Publish to registries (true/false)'
         required: false
         default: 'false'
 
 permissions:
   contents: read
 
-# ─── netconduit-core (Rust extension via maturin) ─────────────────────────────
+# ─── Python wheels (netconduit via maturin) ───────────────────────────────────
 
 jobs:
-  # ── Linux manylinux ──────────────────────────────────────────────────────────
   linux-core:
-    name: Linux (${{ matrix.target }}) — netconduit-core
+    name: Linux (${{ matrix.target }}) — netconduit
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         target: [x86_64, aarch64, armv7]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -42,26 +39,22 @@ jobs:
           args: --release --out ../dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
-
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist
 
-  # ── Linux musl ───────────────────────────────────────────────────────────────
   linux-musl-core:
-    name: Linux musl (${{ matrix.target }}) — netconduit-core
+    name: Linux musl (${{ matrix.target }}) — netconduit
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -70,15 +63,13 @@ jobs:
           args: --release --out ../dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
-
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-musl-${{ matrix.target }}
           path: dist
 
-  # ── Windows ───────────────────────────────────────────────────────────────────
   windows-core:
-    name: Windows (${{ matrix.target }}) — netconduit-core
+    name: Windows (${{ matrix.target }}) — netconduit
     runs-on: windows-latest
     strategy:
       matrix:
@@ -89,12 +80,10 @@ jobs:
             python_arch: x86
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
           architecture: ${{ matrix.python_arch }}
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -102,15 +91,13 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out ../dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.target }}
           path: dist
 
-  # ── macOS ─────────────────────────────────────────────────────────────────────
   macos-core:
-    name: macOS (${{ matrix.target }}) — netconduit-core
+    name: macOS (${{ matrix.target }}) — netconduit
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -121,11 +108,9 @@ jobs:
             target: aarch64
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -133,93 +118,108 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out ../dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
           path: dist
 
-  # ── Source distribution ───────────────────────────────────────────────────────
   sdist-core:
-    name: sdist — netconduit-core
+    name: sdist — netconduit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           working-directory: netconduit_core
           command: sdist
           args: --out ../dist
-
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
           path: dist
 
-  # ─── netconduit (pure Python package) ────────────────────────────────────────
-  pure-python:
-    name: Build — netconduit (pure Python)
+  # ─── Publish to PyPI ──────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish → PyPI
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build wheel and sdist
-        run: python -m build --outdir dist-pure
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-pure-python
-          path: dist-pure
-
-  # ─── Publish ─────────────────────────────────────────────────────────────────
-  publish:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
-    # Only publish on version tags or manual dispatch with publish=true
     if: >
       startsWith(github.ref, 'refs/tags/') ||
       github.event.inputs.publish == 'true'
-    needs:
-      - linux-core
-      - linux-musl-core
-      - windows-core
-      - macos-core
-      - sdist-core
-      - pure-python
+    needs: [linux-core, linux-musl-core, windows-core, macos-core, sdist-core]
     permissions:
-      id-token: write       # required for trusted publishing (OIDC)
-      contents: write       # for release creation
-      attestations: write   # for build provenance
-
+      id-token: write
+      contents: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: all-dist
           merge-multiple: true
-
       - name: List artifacts
         run: ls -la all-dist/
-
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: 'all-dist/*'
-
       - name: Install uv
         uses: astral-sh/setup-uv@v4
-
-      # Publish everything — uv publish accepts globs and handles duplicates gracefully
       - name: Publish to PyPI
         run: uv publish 'all-dist/*'
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+
+  # ─── Publish to crates.io ─────────────────────────────────────────────────────
+  publish-crates:
+    name: Publish → crates.io
+    runs-on: ubuntu-latest
+    if: >
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event.inputs.publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('netconduit_core/Cargo.lock') }}
+      - name: Publish to crates.io
+        working-directory: netconduit_core
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ─── Publish Flutter package to pub.dev ──────────────────────────────────────
+  publish-flutter:
+    name: Publish → pub.dev
+    runs-on: ubuntu-latest
+    if: >
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event.inputs.publish == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.x'
+          channel: 'stable'
+          cache: true
+      - name: Get dependencies
+        working-directory: flutter/netconduit
+        run: flutter pub get
+      - name: Validate package
+        working-directory: flutter/netconduit
+        run: flutter pub publish --dry-run
+      - name: Publish to pub.dev
+        working-directory: flutter/netconduit
+        run: flutter pub publish --force
+        env:
+          # Set PUB_CREDENTIALS as a repository secret.
+          # Generate via: dart pub token add https://pub.dev
+          # then copy ~/.pub-cache/credentials.json content.
+          PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}

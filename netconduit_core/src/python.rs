@@ -511,7 +511,7 @@ impl RustQUICServer {
 // ─── Module Registration ───────────────────────────────────────────────────────
 
 #[pymodule]
-fn netconduit_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn netconduit(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Classes

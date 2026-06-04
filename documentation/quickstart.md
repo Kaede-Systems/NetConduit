@@ -19,7 +19,7 @@ cargo build --release
 ```rust
 // src/bin/server_example.rs
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitServer, ConduitEvent};
+use netconduit::core::{ConduitServer, ConduitEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 // src/bin/client_example.rs
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitClient, ConduitEvent};
+use netconduit::core::{ConduitClient, ConduitEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -131,9 +131,9 @@ stream.close().await?;
 ## Step 5: Signed Messages
 
 ```rust
-use netconduit_core::security::{NodeIdentity, sign_packet, KeyStore};
-use netconduit_core::protocol::Packet;
-use netconduit_core::core::{PROTO_VERSION, FLAG_SIGNED};
+use netconduit::security::{NodeIdentity, sign_packet, KeyStore};
+use netconduit::protocol::Packet;
+use netconduit::core::{PROTO_VERSION, FLAG_SIGNED};
 
 // Generate node identity (persist pkcs8_bytes() to disk for reuse)
 let identity = NodeIdentity::generate()?;

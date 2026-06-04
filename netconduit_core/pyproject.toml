@@ -3,7 +3,7 @@ requires = ["maturin>=1.13,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "netconduit-core"
+name = "netconduit"
 version = "4.0.0"
 description = "High-performance QUIC networking core — Rust extension with Protobuf framing, Ed25519 mesh security, LZ4/Zstd compression, and hardware acceleration"
 readme = "../README.md"
@@ -49,4 +49,4 @@ Changelog = "https://github.com/DarsheeeGamer/NetConduit/blob/main/CHANGELOG.md"
 # Activate the python feature (pyo3 bindings) when building via maturin.
 features = ["python"]
 # Module name inside the package
-module-name = "netconduit_core"
+module-name = "netconduit"

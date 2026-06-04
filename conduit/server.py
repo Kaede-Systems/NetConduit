@@ -7,7 +7,7 @@ import hashlib
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional, Awaitable
 
-from netconduit_core import RustQUICServer, stun_punch_hole
+from netconduit import RustQUICServer, stun_punch_hole
 
 from .data.descriptors import ServerDescriptor
 from .transport import AuthHandler

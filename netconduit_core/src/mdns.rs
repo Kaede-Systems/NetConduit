@@ -76,7 +76,7 @@ impl MdnsAdvertiser {
 /// Discovers NetConduit peers on the LAN via mDNS-SD.
 ///
 /// ```no_run
-/// use netconduit_core::mdns::MdnsDiscovery;
+/// use netconduit::mdns::MdnsDiscovery;
 /// let disc = MdnsDiscovery::new().unwrap();
 /// let peers = disc.scan(std::time::Duration::from_secs(2));
 /// for p in peers { println!("{} -> {}:{}", p.fullname, p.addr, p.port); }

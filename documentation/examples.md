@@ -10,7 +10,7 @@ Real-world usage patterns for NetConduit.
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitServer, ConduitEvent};
+use netconduit::core::{ConduitServer, ConduitEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitServer, ConduitEvent};
+use netconduit::core::{ConduitServer, ConduitEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -114,9 +114,9 @@ stream.close().await?;
 ### Signed Mesh Message
 
 ```rust
-use netconduit_core::security::{NodeIdentity, sign_packet};
-use netconduit_core::protocol::Packet;
-use netconduit_core::core::{PROTO_VERSION, MESH_DEFAULT_TTL, frame_packet};
+use netconduit::security::{NodeIdentity, sign_packet};
+use netconduit::protocol::Packet;
+use netconduit::core::{PROTO_VERSION, MESH_DEFAULT_TTL, frame_packet};
 
 // Node A sends an authenticated message to Node C via server relay
 let identity = NodeIdentity::generate()?;
@@ -159,7 +159,7 @@ client.send_datagram(&serialize_input(keys_pressed)).await?;
 ### Checksum Verification
 
 ```rust
-use netconduit_core::core::{compute_checksum, verify_checksum};
+use netconduit::core::{compute_checksum, verify_checksum};
 
 let data = std::fs::read("important.bin")?;
 let checksum = compute_checksum(&data);  // Blake3-128 hex
@@ -175,7 +175,7 @@ assert!(verify_checksum(&received_data, &checksum));
 Install the extension module:
 
 ```bash
-pip install netconduit-core   # pre-built wheel from PyPI
+pip install netconduit   # pre-built wheel from PyPI
 # or build from source:
 cd netconduit_core && maturin develop --features python
 ```
@@ -183,10 +183,10 @@ cd netconduit_core && maturin develop --features python
 ### Echo Server
 
 ```python
-import netconduit_core
+import netconduit
 import time
 
-server = netconduit_core.RustQUICServer()
+server = netconduit.RustQUICServer()
 
 def on_event(event: str, client_id: str, payload: bytes) -> None:
     if event == "connect":
@@ -214,9 +214,9 @@ except KeyboardInterrupt:
 ### Client
 
 ```python
-import netconduit_core
+import netconduit
 
-client = netconduit_core.RustQUICClient()
+client = netconduit.RustQUICClient()
 
 received: list[bytes] = []
 
@@ -250,16 +250,16 @@ client.disconnect()
 ### Compression Utilities
 
 ```python
-import netconduit_core
+import netconduit
 
 data = b"hello " * 10000
 
 # Compress (codec byte prepended: 0=none, 1=LZ4, 2=Zstd)
-compressed = netconduit_core.compress_payload(data)
+compressed = netconduit.compress_payload(data)
 print(f"{len(data)} → {len(compressed)} bytes")
 
 # Decompress
-original = netconduit_core.decompress_payload(compressed)
+original = netconduit.decompress_payload(compressed)
 assert original == data
 ```
 
@@ -268,13 +268,13 @@ assert original == data
 ### Checksum
 
 ```python
-import netconduit_core
+import netconduit
 
 data = open("file.bin", "rb").read()
-checksum = netconduit_core.compute_checksum(data)   # Blake3-128 hex string
+checksum = netconduit.compute_checksum(data)   # Blake3-128 hex string
 
 # Verify later
-ok = netconduit_core.verify_checksum(data, checksum)
+ok = netconduit.verify_checksum(data, checksum)
 print(f"Integrity: {'OK' if ok else 'CORRUPTED'}")
 ```
 
@@ -283,10 +283,10 @@ print(f"Integrity: {'OK' if ok else 'CORRUPTED'}")
 ### STUN Hole Punching
 
 ```python
-import netconduit_core
+import netconduit
 
 # Discover external address
-external = netconduit_core.stun_punch_hole(
+external = netconduit.stun_punch_hole(
     "stun.l.google.com:19302",
     44444,   # local port
     "",      # empty = discovery only
@@ -294,7 +294,7 @@ external = netconduit_core.stun_punch_hole(
 print(f"External address: {external}")
 
 # Punch hole to peer and get external address simultaneously
-external = netconduit_core.stun_punch_hole(
+external = netconduit.stun_punch_hole(
     "stun.l.google.com:19302",
     44444,
     "peer.external.addr:port",
@@ -306,9 +306,9 @@ external = netconduit_core.stun_punch_hole(
 ### Route Cache (persistent routing table)
 
 ```python
-import netconduit_core
+import netconduit
 
-cache = netconduit_core.RouteCache("/tmp/netconduit_routes")
+cache = netconduit.RouteCache("/tmp/netconduit_routes")
 
 cache.set_route("node-B", "192.168.1.10:9000")
 cache.set_route("node-C", "192.168.1.11:9000")
@@ -326,9 +326,9 @@ cache.flush()
 ### Reorder Buffer
 
 ```python
-import netconduit_core
+import netconduit
 
-buf = netconduit_core.ReorderBuffer(max_gap=64, max_buf=1024)
+buf = netconduit.ReorderBuffer(max_gap=64, max_buf=1024)
 
 # Out-of-order delivery
 buf.push(stream_id=1, sequence_id=2, payload=b"second")
@@ -348,16 +348,16 @@ for seq, data in buf.drain_ready(stream_id=1):
 ### Pack/Unpack Integers
 
 ```python
-import netconduit_core
+import netconduit
 
-be = netconduit_core.BYTE_ORDER_BE
-le = netconduit_core.BYTE_ORDER_LE
+be = netconduit.BYTE_ORDER_BE
+le = netconduit.BYTE_ORDER_LE
 
-packed = netconduit_core.pack_u64(1234567890, be)
-value  = netconduit_core.unpack_u64(packed, be)
+packed = netconduit.pack_u64(1234567890, be)
+value  = netconduit.unpack_u64(packed, be)
 assert value == 1234567890
 
-host_order = netconduit_core.host_byte_order()  # returns BE or LE constant
+host_order = netconduit.host_byte_order()  # returns BE or LE constant
 ```
 
 ---
@@ -365,9 +365,9 @@ host_order = netconduit_core.host_byte_order()  # returns BE or LE constant
 ### Generate Ed25519 Certificate (PEM)
 
 ```python
-import netconduit_core
+import netconduit
 
-cert_pem, key_pem = netconduit_core.generate_ed25519_cert_pem()
+cert_pem, key_pem = netconduit.generate_ed25519_cert_pem()
 # Use cert_pem/key_pem with TLS libraries or save to disk
 with open("server.crt", "w") as f: f.write(cert_pem)
 with open("server.key", "w") as f: f.write(key_pem)
@@ -378,7 +378,7 @@ with open("server.key", "w") as f: f.write(key_pem)
 ### Server Statistics
 
 ```python
-server = netconduit_core.RustQUICServer()
+server = netconduit.RustQUICServer()
 # ... start server ...
 
 clients = server.connected_clients()

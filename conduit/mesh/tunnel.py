@@ -34,7 +34,7 @@ class MemoryTLSTunnel:
                     self.context.load_cert_chain(certfile=c_file.name, keyfile=k_file.name)
             else:
                 # Generate Ed25519 cert/key on the fly using Rust netconduit_core helper
-                from netconduit_core import generate_ed25519_cert_pem
+                from netconduit import generate_ed25519_cert_pem
                 c_pem, k_pem = generate_ed25519_cert_pem()
                 import tempfile
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as c_file, \

@@ -10,7 +10,7 @@ Complete reference for `ConduitClient`.
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitClient, ConduitEvent};
+use netconduit::core::{ConduitClient, ConduitEvent};
 
 let (tx, mut rx) = mpsc::channel::<ConduitEvent>(8192);
 let client = ConduitClient::connect(
@@ -138,9 +138,9 @@ stream.close().await?;
 ## Signed Messages (Ed25519)
 
 ```rust
-use netconduit_core::security::{NodeIdentity, sign_packet, KeyStore};
-use netconduit_core::protocol::Packet;
-use netconduit_core::core::{PROTO_VERSION, FLAG_SIGNED};
+use netconduit::security::{NodeIdentity, sign_packet, KeyStore};
+use netconduit::protocol::Packet;
+use netconduit::core::{PROTO_VERSION, FLAG_SIGNED};
 
 // Generate once, persist pkcs8_bytes() to disk
 let identity = NodeIdentity::generate()?;
@@ -172,8 +172,8 @@ assert!(store.verify(&received_pkt));
 Send a packet through the server to another peer:
 
 ```rust
-use netconduit_core::protocol::Packet;
-use netconduit_core::core::{PROTO_VERSION, MESH_DEFAULT_TTL, frame_packet};
+use netconduit::protocol::Packet;
+use netconduit::core::{PROTO_VERSION, MESH_DEFAULT_TTL, frame_packet};
 
 let pkt = Packet {
     version: PROTO_VERSION,
@@ -197,7 +197,7 @@ s.finish()?;
 Discover the external address and punch a UDP hole simultaneously:
 
 ```rust
-use netconduit_core::core::stun_punch_hole;
+use netconduit::core::stun_punch_hole;
 
 let external_addr = stun_punch_hole(
     "stun.l.google.com:19302".to_string(),
@@ -237,12 +237,12 @@ client.disconnect().await;
 
 ---
 
-## Python (netconduit_core extension)
+## Python
 
 ```python
-import netconduit_core
+import netconduit
 
-client = netconduit_core.RustQUICClient()
+client = netconduit.RustQUICClient()
 
 def on_event(event: str, client_id: str, payload: bytes):
     if event == "connect":
@@ -274,8 +274,8 @@ See [Python Guide](../examples.md#python) for more complete examples.
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitClient, ConduitEvent};
-use netconduit_core::security::NodeIdentity;
+use netconduit::core::{ConduitClient, ConduitEvent};
+use netconduit::security::NodeIdentity;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

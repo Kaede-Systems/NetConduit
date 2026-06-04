@@ -6,7 +6,7 @@ from typing import Any, Optional, Union
 import json
 
 try:
-    from netconduit_core import decompress_payload as _rust_decompress
+    from netconduit import decompress_payload as _rust_decompress
     _RUST_COMPRESSION = True
 except ImportError:
     _RUST_COMPRESSION = False

@@ -8,7 +8,7 @@ Complete reference for `ConduitServer`.
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitServer, ConduitEvent};
+use netconduit::core::{ConduitServer, ConduitEvent};
 
 let (tx, mut rx) = mpsc::channel::<ConduitEvent>(8192);
 // 0 = use MAX_CONNECTIONS default (1024)
@@ -87,7 +87,7 @@ server.send_datagram(&client_id, b"tick".to_vec())?;
 Register a logical channel with custom reliability and compression settings:
 
 ```rust
-use netconduit_core::core::{ChannelConfig, ChannelMode, CompressionPolicy};
+use netconduit::core::{ChannelConfig, ChannelMode, CompressionPolicy};
 
 // Reliable ordered channel with auto compression (default behaviour)
 server.register_channel(ChannelConfig {
@@ -163,7 +163,7 @@ let cert_der: Vec<u8> = server.cert_der.clone();
 Process-wide atomic counters, updated by every server and client connection:
 
 ```rust
-use netconduit_core::core::{METRICS, metrics_snapshot};
+use netconduit::core::{METRICS, metrics_snapshot};
 use std::sync::atomic::Ordering;
 
 // Snapshot (all counters at once, Relaxed ordering)
@@ -199,7 +199,7 @@ The server creates a `ResourcePool` automatically (`default_for_machine()`). It 
 To use a custom pool size:
 
 ```rust
-use netconduit_core::core::ResourcePool;
+use netconduit::core::ResourcePool;
 
 let pool = ResourcePool::new(512);
 println!("Active tasks: {}", pool.active_tasks());
@@ -214,8 +214,8 @@ The server automatically relays packets when `Packet.dst_id` is set to another c
 
 ```rust
 // Client A sends a packet routed through the server to Client B:
-use netconduit_core::protocol::Packet;
-use netconduit_core::core::{PROTO_VERSION, MESH_DEFAULT_TTL};
+use netconduit::protocol::Packet;
+use netconduit::core::{PROTO_VERSION, MESH_DEFAULT_TTL};
 
 let pkt = Packet {
     version: PROTO_VERSION,
@@ -240,7 +240,7 @@ The server:
 
 ```rust
 use tokio::sync::mpsc;
-use netconduit_core::core::{ConduitServer, ConduitEvent, ChannelConfig};
+use netconduit::core::{ConduitServer, ConduitEvent, ChannelConfig};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -288,12 +288,12 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-## Python (netconduit_core extension)
+## Python
 
 ```python
-import netconduit_core
+import netconduit
 
-server = netconduit_core.RustQUICServer()
+server = netconduit.RustQUICServer()
 
 def on_event(event: str, client_id: str, payload: bytes):
     if event == "connect":

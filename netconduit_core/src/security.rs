@@ -8,7 +8,7 @@
 /// # Usage
 ///
 /// ```no_run
-/// use netconduit_core::security::NodeIdentity;
+/// use netconduit::security::NodeIdentity;
 /// let id = NodeIdentity::generate().unwrap();
 /// let sig = id.sign(b"hello");
 /// assert!(NodeIdentity::verify(&id.public_key, b"hello", &sig));

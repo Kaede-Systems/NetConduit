@@ -25,7 +25,7 @@ from .protocol_pb2 import (
 from .format import MessageType, MessageFlags, PROTOCOL_VERSION
 
 try:
-    from netconduit_core import compress_payload, decompress_payload
+    from netconduit import compress_payload, decompress_payload
     _RUST_COMPRESSION = True
 except ImportError:
     _RUST_COMPRESSION = False

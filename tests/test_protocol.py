@@ -450,7 +450,7 @@ class TestOrderingAndByteOrder:
     
     def test_byte_order_helpers(self):
         """Test byte order helper functions in netconduit_core."""
-        from netconduit_core import host_byte_order, pack_u64, pack_u32, unpack_u64, unpack_u32
+        from netconduit import host_byte_order, pack_u64, pack_u32, unpack_u64, unpack_u32
         
         # Test host_byte_order returns 0 or 1
         hbo = host_byte_order()
@@ -478,7 +478,7 @@ class TestOrderingAndByteOrder:
 
     def test_sequence_counter(self):
         """Test SequenceCounter from netconduit_core."""
-        from netconduit_core import SequenceCounter
+        from netconduit import SequenceCounter
         
         sc = SequenceCounter()
         assert sc.peek(1) == 0
@@ -495,7 +495,7 @@ class TestOrderingAndByteOrder:
 
     def test_reorder_buffer(self):
         """Test ReorderBuffer from netconduit_core."""
-        from netconduit_core import ReorderBuffer
+        from netconduit import ReorderBuffer
         
         rb = ReorderBuffer(max_gap=3, max_buf=10)
         stream_id = 42
