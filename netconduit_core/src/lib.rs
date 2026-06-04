@@ -695,9 +695,7 @@ impl RustQUICServer {
                     if let Some(conn) = conn {
                         tokio::spawn(async move {
                             if let Ok(mut s) = conn.open_uni().await {
-                                for chunk in payload.chunks(READ_CHUNK) {
-                                    if s.write_all(chunk).await.is_err() { break; }
-                                }
+                                let _ = s.write_all(&payload).await;
                                 let _ = s.finish();
                             }
                         });
@@ -802,9 +800,7 @@ impl RustQUICServer {
                     let name = stream_name.as_bytes();
                     let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
                     let _ = send.write_all(name).await;
-                    for chunk in data.chunks(READ_CHUNK) {
-                        if send.write_all(chunk).await.is_err() { break; }
-                    }
+                    let _ = send.write_all(&data).await;
                     let _ = send.finish();
                 }
             });
@@ -975,9 +971,7 @@ impl RustQUICClient {
             let conn = conn.clone();
             rt.block_on(async move {
                 if let Ok(mut s) = conn.open_uni().await {
-                    for chunk in payload.chunks(READ_CHUNK) {
-                        if s.write_all(chunk).await.is_err() { break; }
-                    }
+                    let _ = s.write_all(&payload).await;
                     let _ = s.finish();
                 }
             });
@@ -993,9 +987,7 @@ impl RustQUICClient {
                     let name = stream_name.as_bytes();
                     let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
                     let _ = send.write_all(name).await;
-                    for chunk in data.chunks(READ_CHUNK) {
-                        if send.write_all(chunk).await.is_err() { break; }
-                    }
+                    let _ = send.write_all(&data).await;
                     let _ = send.finish();
                 }
             });
