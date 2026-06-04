@@ -635,6 +635,11 @@ class Client:
         except Exception:
             return "127.0.0.1"
 
+    def _is_loopback(self, h: str) -> bool:
+        """Check if host is loopback."""
+        hl = h.lower()
+        return hl in ("localhost", "127.0.0.1", "::1") or hl.startswith("127.")
+
     async def establish_p2p(self, target_client_id: str, timeout: float = 20.0) -> 'Client':
         """
         Establish a direct peer-to-peer connection to another client.
@@ -673,12 +678,17 @@ class Client:
             stun_server = self._config.stun_server
             
             # 4. Perform STUN mapping on local_port
-            try:
-                public_addr = stun_punch_hole(stun_server, local_port, "")
-            except Exception:
-                public_addr = ""
+            public_addr = ""
+            if not self._is_loopback(self._config.server_host) and stun_server:
+                try:
+                    public_addr = stun_punch_hole(stun_server, local_port, "")
+                except Exception:
+                    public_addr = ""
             if not public_addr:
-                public_addr = f"{self._get_local_ip()}:{local_port}"
+                if self._is_loopback(self._config.server_host):
+                    public_addr = f"127.0.0.1:{local_port}"
+                else:
+                    public_addr = f"{self._get_local_ip()}:{local_port}"
                 
             # 5. Tell the target to punch towards our public address
             await self.send("p2p_punch_source", {
@@ -774,13 +784,18 @@ class Client:
                 self._p2p_servers[request_id] = (local_server, connection_future)
                 
                 stun_server = self._config.stun_server
-                try:
-                    public_addr = stun_punch_hole(stun_server, local_port, "")
-                except Exception:
-                    public_addr = ""
-                    
+                public_addr = ""
+                if not self._is_loopback(self._config.server_host) and stun_server:
+                    try:
+                        public_addr = stun_punch_hole(stun_server, local_port, "")
+                    except Exception:
+                        public_addr = ""
+                        
                 if not public_addr:
-                    public_addr = f"{self._get_local_ip()}:{local_port}"
+                    if self._is_loopback(self._config.server_host):
+                        public_addr = f"127.0.0.1:{local_port}"
+                    else:
+                        public_addr = f"{self._get_local_ip()}:{local_port}"
                 
                 await self.send("p2p_accept", {
                     "request_id": request_id,
