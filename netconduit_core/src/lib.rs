@@ -412,60 +412,62 @@ fn stun_punch_hole(stun_server: String, local_port: u16, peer_addr: String) -> P
         
     let socket: std::net::UdpSocket = sock.into();
 
-    let mut request = [0u8; 20];
-    request[0..2].copy_from_slice(&0x0001u16.to_be_bytes());
-    request[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes());
-    for i in 8..20 { request[i] = (i as u8).wrapping_mul(17); }
-
-    let stun_sock = if let Ok(addr) = stun_server.parse::<SocketAddr>() {
-        addr
-    } else {
-        let (host, port) = if let Some(pos) = stun_server.rfind(':') {
-            let (h, p_str) = stun_server.split_at(pos);
-            let p = p_str[1..].parse::<u16>().unwrap_or(19302);
-            (h, p)
-        } else {
-            (stun_server.as_str(), 19302)
-        };
-        resolve_addr(host, port)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Could not resolve STUN host: {}", e)))?
-    };
-    socket.send_to(&request, stun_sock)?;
-    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-
-    let mut buf = [0u8; 1024];
     let mut mapped_addr: Option<SocketAddr> = None;
+    
+    if !stun_server.is_empty() {
+        let mut request = [0u8; 20];
+        request[0..2].copy_from_slice(&0x0001u16.to_be_bytes());
+        request[4..8].copy_from_slice(&0x2112A442u32.to_be_bytes());
+        for i in 8..20 { request[i] = (i as u8).wrapping_mul(17); }
 
-    if let Ok((len, _)) = socket.recv_from(&mut buf) {
-        let mut idx = 20usize;
-        while idx + 4 <= len {
-            let attr_type = u16::from_be_bytes([buf[idx], buf[idx+1]]);
-            let attr_len  = u16::from_be_bytes([buf[idx+2], buf[idx+3]]) as usize;
-            idx += 4;
-            if idx + attr_len > len { break; }
+        let stun_sock = if let Ok(addr) = stun_server.parse::<SocketAddr>() {
+            addr
+        } else {
+            let (host, port) = if let Some(pos) = stun_server.rfind(':') {
+                let (h, p_str) = stun_server.split_at(pos);
+                let p = p_str[1..].parse::<u16>().unwrap_or(19302);
+                (h, p)
+            } else {
+                (stun_server.as_str(), 19302)
+            };
+            resolve_addr(host, port)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Could not resolve STUN host: {}", e)))?
+        };
+        let _ = socket.send_to(&request, stun_sock);
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
 
-            if attr_type == 0x0020 && attr_len >= 8 {
-                let family = buf[idx + 1];
-                let port = u16::from_be_bytes([buf[idx+2], buf[idx+3]]) ^ 0x2112;
-                if family == 1 {
-                    let mut ip = [0u8; 4];
-                    ip.copy_from_slice(&buf[idx+4..idx+8]);
-                    let xor = 0x2112A442u32.to_be_bytes();
-                    for i in 0..4 { ip[i] ^= xor[i]; }
-                    mapped_addr = Some(SocketAddr::new(std::net::IpAddr::V4(ip.into()), port));
-                    break;
-                } else if family == 2 && attr_len >= 20 {
-                    let mut ip = [0u8; 16];
-                    ip.copy_from_slice(&buf[idx+4..idx+20]);
-                    let xor = 0x2112A442u32.to_be_bytes();
-                    for i in 0..4 { ip[i] ^= xor[i]; }
-                    for i in 4..16 { ip[i] ^= request[8 + (i - 4)]; }
-                    mapped_addr = Some(SocketAddr::new(std::net::IpAddr::V6(ip.into()), port));
-                    break;
+        let mut buf = [0u8; 1024];
+        if let Ok((len, _)) = socket.recv_from(&mut buf) {
+            let mut idx = 20usize;
+            while idx + 4 <= len {
+                let attr_type = u16::from_be_bytes([buf[idx], buf[idx+1]]);
+                let attr_len  = u16::from_be_bytes([buf[idx+2], buf[idx+3]]) as usize;
+                idx += 4;
+                if idx + attr_len > len { break; }
+
+                if attr_type == 0x0020 && attr_len >= 8 {
+                    let family = buf[idx + 1];
+                    let port = u16::from_be_bytes([buf[idx+2], buf[idx+3]]) ^ 0x2112;
+                    if family == 1 {
+                        let mut ip = [0u8; 4];
+                        ip.copy_from_slice(&buf[idx+4..idx+8]);
+                        let xor = 0x2112A442u32.to_be_bytes();
+                        for i in 0..4 { ip[i] ^= xor[i]; }
+                        mapped_addr = Some(SocketAddr::new(std::net::IpAddr::V4(ip.into()), port));
+                        break;
+                    } else if family == 2 && attr_len >= 20 {
+                        let mut ip = [0u8; 16];
+                        ip.copy_from_slice(&buf[idx+4..idx+20]);
+                        let xor = 0x2112A442u32.to_be_bytes();
+                        for i in 0..4 { ip[i] ^= xor[i]; }
+                        for i in 4..16 { ip[i] ^= request[8 + (i - 4)]; }
+                        mapped_addr = Some(SocketAddr::new(std::net::IpAddr::V6(ip.into()), port));
+                        break;
+                    }
                 }
-            }
 
-            idx += attr_len + (if attr_len % 4 != 0 { 4 - attr_len % 4 } else { 0 });
+                idx += attr_len + (if attr_len % 4 != 0 { 4 - attr_len % 4 } else { 0 });
+            }
         }
     }
 

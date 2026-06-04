@@ -557,6 +557,12 @@ class Server:
                 dst = decoded.route_dst
                 conn = self._pool.get(dst)
                 if not conn:
+                    # Fallback to name-based lookup in pool
+                    for c in self._pool.get_all():
+                        if c.session and c.session.client_info and c.session.client_info.get("name") == dst:
+                            conn = c
+                            break
+                if not conn:
                     next_hop = self._mesh_routing_table.get(dst)
                     if next_hop:
                         conn = self._pool.get(next_hop)

@@ -119,3 +119,107 @@ def test_stun_dns_resolution():
     except Exception as e:
         pytest.fail(f"stun_punch_hole failed with: {e}")
 
+
+@pytest.mark.asyncio
+async def test_p2p_mesh_fallback():
+    # 1. Setup Broker Server
+    broker_port = get_free_port()
+    broker_server = Server(ServerDescriptor(
+        name="broker_server",
+        host="127.0.0.1",
+        port=broker_port,
+        password="broker_password",
+    ))
+    await broker_server.start()
+    
+    # 2. Setup Client A (Initiator) and Client B (Listener)
+    client_a = Client(ClientDescriptor(
+        server_host="127.0.0.1",
+        server_port=broker_port,
+        password="broker_password",
+        name="client_a",
+        reconnect_enabled=False,
+    ))
+    
+    client_b = Client(ClientDescriptor(
+        server_host="127.0.0.1",
+        server_port=broker_port,
+        password="broker_password",
+        name="client_b",
+        reconnect_enabled=False,
+    ))
+    
+    assert await client_a.connect()
+    assert await client_b.connect()
+    
+    # Monkeypatch client_b.send to return unroutable IP addresses, forcing direct P2P connection to fail
+    original_send = client_b.send
+    async def mock_send(msg_type, data):
+        if msg_type == "p2p_accept" and data.get("accepted"):
+            data["public_addr"] = "240.0.0.1:9999"
+            data["lan_addr"] = "240.0.0.1:9999"
+        await original_send(msg_type, data)
+    client_b.send = mock_send
+    
+    # Future to hold B's peer client once established via mesh fallback
+    peer_client_b_future = asyncio.get_running_loop().create_future()
+    msg_from_a_future = asyncio.get_running_loop().create_future()
+    
+    # Configure Client B to accept incoming P2P requests
+    @client_b.on_p2p_request
+    async def on_p2p_req(source_id: str) -> bool:
+        return True
+        
+    @client_b.on_p2p_established
+    async def on_p2p_est(peer_client: Client):
+        # Register a local RPC method on B's peer client
+        @peer_client.rpc("peer_add")
+        async def peer_add(a: int, b: int) -> int:
+            return a + b
+            
+        @peer_client.on("peer_msg")
+        async def handle_peer_msg(data: Any):
+            msg_from_a_future.set_result(data)
+            
+        peer_client_b_future.set_result(peer_client)
+        
+    try:
+        # 3. Establish P2P Connection from A to B (will fail direct connect and fall back to Mesh)
+        peer_client_a = await client_a.establish_p2p("client_b", timeout=8.0)
+        assert peer_client_a is not None
+        assert peer_client_a.is_connected
+        
+        # Verify that it is a MeshFallbackClient
+        from conduit.client import MeshFallbackClient
+        assert isinstance(peer_client_a, MeshFallbackClient)
+        
+        # Register local RPC method on A's peer client
+        @peer_client_a.rpc("peer_multiply")
+        async def peer_multiply(x: float, y: float) -> float:
+            return x * y
+            
+        # Wait for Client B to establish its peer client mapping via mesh
+        peer_client_b = await asyncio.wait_for(peer_client_b_future, timeout=8.0)
+        assert peer_client_b is not None
+        assert isinstance(peer_client_b, MeshFallbackClient)
+        
+        # 4. Perform symmetric RPC and messaging checks over the MeshFallbackClient!
+        
+        # Test RPC from Client A to Client B
+        res_add = await peer_client_a.rpc.call("peer_add", a=40, b=2)
+        assert res_add == 42
+        
+        # Test RPC from Client B to Client A
+        res_mult = await peer_client_b.rpc.call("peer_multiply", x=3.5, y=2.0)
+        assert res_mult == 7.0
+        
+        # Test Message from Client A to Client B
+        await peer_client_a.send("peer_msg", {"greeting": "hello from initiator via mesh fallback"})
+        received_msg = await asyncio.wait_for(msg_from_a_future, timeout=5.0)
+        assert received_msg == {"greeting": "hello from initiator via mesh fallback"}
+        
+    finally:
+        # Clean up connections and servers
+        await client_a.disconnect()
+        await client_b.disconnect()
+        await broker_server.stop()

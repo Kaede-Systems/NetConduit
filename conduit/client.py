@@ -259,6 +259,7 @@ class Client:
             msg_type_str = decoded.get_message_type_str()
             
             if msg_type_str == "mesh_handshake":
+                import inspect
                 handshake_data = decoded.get_data()
                 tunnel = self._mesh_tunnels.get(src)
                 if not tunnel:
@@ -283,6 +284,32 @@ class Client:
                         is_mesh=True
                     )
                     await self._send_mesh_raw(src, response_packet)
+                
+                # Check if this mesh handshake completes a fallback for a pending P2P request from 'src'
+                if tunnel.handshake_done:
+                    pending_request_id = None
+                    for req_id, server_info in list(self._p2p_servers.items()):
+                        if len(server_info) >= 3 and server_info[2] == src:
+                            pending_request_id = req_id
+                            local_server, connection_future, _ = server_info
+                            break
+                            
+                    if pending_request_id:
+                        logger.info(f"P2P direct connection failed. Fallback to Mesh P2P Client for {src} (like WebRTC TURN)")
+                        self._p2p_servers.pop(pending_request_id, None)
+                        try:
+                            asyncio.create_task(local_server.stop())
+                        except Exception as e:
+                            logger.warning(f"Error stopping local server during mesh fallback: {e}")
+                        if not connection_future.done():
+                            connection_future.cancel()
+                            
+                        peer_client = MeshFallbackClient(self, src, tunnel)
+                        self._peer_clients[src] = peer_client
+                        if self._on_p2p_established:
+                            res = self._on_p2p_established(peer_client)
+                            if inspect.isawaitable(res):
+                                asyncio.create_task(res)
                 return
 
             elif msg_type_str == "mesh_secure":
@@ -290,6 +317,12 @@ class Client:
                 tunnel = self._mesh_tunnels.get(src)
                 if tunnel:
                     decrypted = tunnel.feed_encrypted(encrypted_data)
+                    # If we have a mesh fallback client for this src, pass the decrypted payload to it!
+                    peer_client = self._peer_clients.get(src)
+                    if peer_client and hasattr(peer_client, "_mesh_connection"):
+                        peer_client._mesh_connection.handle_decrypted_payload(decrypted)
+                        return
+                        
                     inner_decoded = self._decoder.decode_single(decrypted)
                     inner_msg_type_str = inner_decoded.get_message_type_str()
                     inner_data = inner_decoded.get_data()
@@ -537,7 +570,7 @@ class Client:
     async def _send_mesh_raw(self, target_node_id: str, packet: bytes):
         """Send raw packet to next hop towards target_node_id."""
         peer = self._peer_clients.get(target_node_id)
-        if peer:
+        if peer and not hasattr(peer, "_mesh_connection"):
             if hasattr(peer, "_handle_rust_event"):
                 peer._handle_rust_event("message", self._config.name, packet)
             elif hasattr(peer, "send_raw"):
@@ -715,64 +748,113 @@ class Client:
             # Small delay to let message route and target perform its punch
             await asyncio.sleep(0.2)
             
-            # 6. Perform our punch towards target's addresses (skip if local)
+            # 6. Perform our punch towards target's addresses
             try:
                 target_ip = target_addr.split(":")[0]
                 is_target_local = self._is_loopback(target_ip) or self._is_private_ip(target_ip)
-                if not is_local and not is_target_local:
-                    logger.info(f"P2P Punching from initiator port {local_port} to {target_addr}")
-                    stun_punch_hole(stun_server, local_port, target_addr)
-                    if target_lan_addr:
-                        logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr}")
-                        stun_punch_hole(stun_server, local_port, target_lan_addr)
-                else:
-                    logger.info("Local network connection detected, bypassing initiator UDP punch")
+                punch_stun = "" if (is_local or is_target_local) else stun_server
+                
+                logger.info(f"P2P Punching from initiator port {local_port} to {target_addr} (STUN: {punch_stun or 'None/LAN'})")
+                stun_punch_hole(punch_stun, local_port, target_addr)
+                if target_lan_addr:
+                    logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr} (STUN: {punch_stun or 'None/LAN'})")
+                    stun_punch_hole(punch_stun, local_port, target_lan_addr)
             except Exception as e:
                 logger.warning(f"P2P Punching from initiator failed: {e}")
                 
             await asyncio.sleep(0.1)
             
-            # 7. Connect directly to target! Try LAN first, then WAN
+            # 7. Connect directly to target! Try LAN and WAN in parallel (like WebRTC ICE racing)
             peer_client = None
-            if target_lan_addr:
+            
+            async def try_connect_lan():
+                if not target_lan_addr:
+                    return None
                 try:
                     host, port_str = target_lan_addr.split(":")
                     port = int(port_str)
                     from conduit import ClientDescriptor
-                    peer_client = Client(ClientDescriptor(
+                    # Since LAN is direct, bind to a random local port to avoid conflict with the punched local_port
+                    lan_port = self._get_free_port()
+                    cli = Client(ClientDescriptor(
+                        server_host=host,
+                        server_port=port,
+                        password=self._config.password,
+                        local_port=lan_port,
+                        reconnect_enabled=False,
+                        name=f"{self._config.name}_to_{target_client_id}_lan",
+                        connect_timeout=3,
+                    ))
+                    connected = await cli.connect()
+                    if connected:
+                        logger.info(f"Connected to peer via LAN address {target_lan_addr}")
+                        return cli
+                except Exception as e:
+                    logger.warning(f"Failed to connect to LAN address {target_lan_addr}: {e}")
+                return None
+
+            async def try_connect_wan():
+                try:
+                    host, port_str = target_addr.split(":")
+                    port = int(port_str)
+                    from conduit import ClientDescriptor
+                    # WAN must bind to the punched local_port to traverse NAT
+                    cli = Client(ClientDescriptor(
                         server_host=host,
                         server_port=port,
                         password=self._config.password,
                         local_port=local_port,
                         reconnect_enabled=False,
-                        name=f"{self._config.name}_to_{target_client_id}_lan",
-                        connect_timeout=2,  # Quick timeout for local LAN try
+                        name=f"{self._config.name}_to_{target_client_id}",
+                        connect_timeout=5,
                     ))
-                    connected = await peer_client.connect()
+                    connected = await cli.connect()
                     if connected:
-                        logger.info(f"Connected to peer via LAN address {target_lan_addr}")
-                    else:
-                        peer_client = None
+                        logger.info(f"Connected to peer via WAN address {target_addr}")
+                        return cli
                 except Exception as e:
-                    logger.warning(f"Failed to connect to LAN address {target_lan_addr}: {e}")
-                    peer_client = None
+                    logger.warning(f"Failed to connect to WAN address {target_addr}: {e}")
+                return None
+
+            # Race the connection attempts concurrently
+            tasks = []
+            if target_lan_addr:
+                tasks.append(asyncio.create_task(try_connect_lan()))
+            tasks.append(asyncio.create_task(try_connect_wan()))
+            
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                res = task.result()
+                if res:
+                    peer_client = res
+                    break
+                    
+            if not peer_client and pending:
+                for task in asyncio.as_completed(pending):
+                    res = await task
+                    if res:
+                        peer_client = res
+                        break
+                        
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+                    
+            # 8. Fallback to E2E encrypted Mesh network if both connection attempts fail (like WebRTC TURN fallback)
+            if not peer_client:
+                logger.info(f"Direct connection to {target_client_id} failed. Falling back to Mesh tunnel (like WebRTC TURN)...")
+                try:
+                    await self.establish_mesh_tunnel(target_client_id)
+                    tunnel = self._mesh_tunnels.get(target_client_id)
+                    if tunnel and tunnel.handshake_done:
+                        peer_client = MeshFallbackClient(self, target_client_id, tunnel)
+                        self._peer_clients[target_client_id] = peer_client
+                        logger.info(f"Mesh fallback P2P connection established to {target_client_id}!")
+                except Exception as e:
+                    logger.error(f"Mesh fallback connection failed: {e}")
                     
             if not peer_client:
-                host, port_str = target_addr.split(":")
-                port = int(port_str)
-                from conduit import ClientDescriptor
-                peer_client = Client(ClientDescriptor(
-                    server_host=host,
-                    server_port=port,
-                    password=self._config.password,
-                    local_port=local_port,
-                    reconnect_enabled=False,
-                    name=f"{self._config.name}_to_{target_client_id}",
-                ))
-                connected = await peer_client.connect()
-                if not connected:
-                    raise ConnectionError(f"Failed to connect to peer at {target_addr}")
-                logger.info(f"Connected to peer via WAN address {target_addr}")
+                raise ConnectionError(f"Failed to connect to peer at {target_addr} (direct and fallback failed)")
                 
             return peer_client
             
@@ -828,7 +910,7 @@ class Client:
                     if not connection_future.done():
                         connection_future.set_result(conn)
                 
-                self._p2p_servers[request_id] = (local_server, connection_future)
+                self._p2p_servers[request_id] = (local_server, connection_future, source_id)
                 
                 stun_server = self._config.stun_server
                 public_addr = ""
@@ -899,7 +981,7 @@ class Client:
             
             server_info = self._p2p_servers.get(request_id)
             if server_info:
-                local_server, _ = server_info
+                local_server = server_info[0]
                 local_port = local_server._config.port
                 stun_server = self._config.stun_server
                 
@@ -908,14 +990,12 @@ class Client:
                 is_source_local = self._is_loopback(source_ip) or self._is_private_ip(source_ip)
                 
                 try:
-                    if not is_local and not is_source_local:
-                        logger.info(f"P2P Punching from listener port {local_port} to {source_addr}")
-                        stun_punch_hole(stun_server, local_port, source_addr)
-                        if source_lan_addr:
-                            logger.info(f"P2P Punching from listener port {local_port} to LAN {source_lan_addr}")
-                            stun_punch_hole(stun_server, local_port, source_lan_addr)
-                    else:
-                        logger.info("Local network connection detected, bypassing listener UDP punch")
+                    punch_stun = "" if (is_local or is_source_local) else stun_server
+                    logger.info(f"P2P Punching from listener port {local_port} to {source_addr} (STUN: {punch_stun or 'None/LAN'})")
+                    stun_punch_hole(punch_stun, local_port, source_addr)
+                    if source_lan_addr:
+                        logger.info(f"P2P Punching from listener port {local_port} to LAN {source_lan_addr} (STUN: {punch_stun or 'None/LAN'})")
+                        stun_punch_hole(punch_stun, local_port, source_lan_addr)
                 except Exception as e:
                     logger.warning(f"P2P Punching from listener failed: {e}")
                 
@@ -933,3 +1013,181 @@ class Client:
         self._message_router.register("p2p_incoming", handle_p2p_incoming, requires_auth=False)
         self._message_router.register("p2p_punch_cmd", handle_p2p_punch_cmd, requires_auth=False)
         self._message_router.register("p2p_request_response", handle_p2p_request_response, requires_auth=False)
+
+
+class MeshConnection:
+    """
+    A connection wrapper that implements the Conduit connection interface,
+    but tunnels all messages over an in-memory MemoryTLSTunnel mesh routing system.
+    """
+    def __init__(self, main_client: Any, peer_id: str, tunnel: Any, encoder=None, decoder=None):
+        self._main_client = main_client
+        self._peer_id = peer_id
+        self._tunnel = tunnel
+        self._encoder = encoder or ProtocolEncoder()
+        self._decoder = decoder or ProtocolDecoder()
+        self._pending_rpcs = {}
+        from conduit.connection.connection import ConnectionStats
+        self._stats = ConnectionStats()
+        self._on_message = None
+        self._on_disconnect = None
+        self._authenticated = True
+        
+    @property
+    def id(self) -> str:
+        return f"mesh_{self._peer_id}"
+        
+    @property
+    def is_connected(self) -> bool:
+        return self._tunnel.handshake_done
+        
+    @property
+    def is_authenticated(self) -> bool:
+        return True
+        
+    @property
+    def remote_address(self) -> str:
+        return self._peer_id
+        
+    @property
+    def stats(self):
+        return self._stats
+        
+    async def send_message(self, message_type: str, data: Any) -> None:
+        encoded = self._encoder.encode_message(message_type, data)
+        await self._send_encrypted(encoded)
+        
+    async def send_rpc_request(self, method: str, params: dict) -> int:
+        encoded, corr_id = self._encoder.encode_rpc_request(method, params)
+        future = asyncio.get_running_loop().create_future()
+        self._pending_rpcs[corr_id] = future
+        await self._send_encrypted(encoded)
+        return corr_id
+        
+    async def wait_for_rpc_response(self, correlation_id: int) -> Any:
+        future = self._pending_rpcs.get(correlation_id)
+        if future is None:
+            raise ValueError(f"No pending RPC for correlation ID {correlation_id}")
+        try:
+            return await future
+        finally:
+            self._pending_rpcs.pop(correlation_id, None)
+            
+    async def send_rpc_response(self, result: Any, correlation_id: int) -> None:
+        encoded = self._encoder.encode_rpc_response(result, correlation_id)
+        await self._send_encrypted(encoded)
+        
+    async def send_rpc_error(self, error: str, correlation_id: int, code: int = None) -> None:
+        encoded = self._encoder.encode_rpc_error(error, correlation_id, code)
+        await self._send_encrypted(encoded)
+        
+    async def send_raw(self, encoded: bytes) -> None:
+        await self._send_encrypted(encoded)
+        
+    async def _send_encrypted(self, payload: bytes) -> None:
+        encrypted = self._tunnel.write_plaintext(payload)
+        from .protocol.protocol_pb2 import MessagePayload
+        from .protocol.encoder import serialize_data
+        inner_payload = MessagePayload(
+            type="mesh_secure",
+            data=serialize_data(encrypted)
+        )
+        packet = self._encoder.encode(
+            MessageType.MESSAGE,
+            payload_bytes=inner_payload.SerializeToString(),
+            route_src=self._main_client._config.name,
+            route_dst=self._peer_id,
+            is_mesh=True
+        )
+        await self._main_client._send_mesh_raw(self._peer_id, packet)
+        self._stats.bytes_sent += len(packet)
+        self._stats.messages_sent += 1
+
+    def handle_decrypted_payload(self, decrypted: bytes) -> None:
+        decoded = self._decoder.decode_single(decrypted)
+        
+        # Intercept connection-specific RPCs (like responses/errors)
+        intercepted = self.handle_decoded_message(decoded)
+        if intercepted:
+            return
+                
+        if self._on_message:
+            asyncio.create_task(self._on_message(self, decoded))
+            
+    def handle_decoded_message(self, message: Any) -> bool:
+        self._stats.messages_received += 1
+        self._stats.bytes_received += len(message.raw_payload)
+        
+        msg_type = message.message_type
+        if msg_type in (MessageType.RPC_RESPONSE, MessageType.RPC_ERROR):
+            corr_id = message.correlation_id
+            future = self._pending_rpcs.get(corr_id)
+            if future and not future.done():
+                future.set_result(message.payload)
+                return True
+        return False
+            
+    def set_message_handler(self, handler: Callable) -> None:
+        self._on_message = handler
+        
+    def set_disconnect_handler(self, handler: Callable) -> None:
+        self._on_disconnect = handler
+        
+    async def stop(self) -> None:
+        if self._on_disconnect:
+            try:
+                handler = self._on_disconnect
+                self._on_disconnect = None
+                await handler(self)
+            except Exception as e:
+                logger.error(f"Error in disconnect callback: {e}")
+
+
+class MeshFallbackClient(Client):
+    """
+    A Client subclass that routes all messages and RPCs over an
+    established E2E encrypted mesh tunnel rather than a direct QUIC link.
+    """
+    def __init__(self, main_client: Client, peer_id: str, tunnel: Any):
+        from conduit import ClientDescriptor
+        dummy_desc = ClientDescriptor(
+            server_host="mesh-fallback",
+            server_port=1,
+            password=main_client._config.password,
+            name=f"{main_client._config.name}_to_{peer_id}_mesh",
+        )
+        super().__init__(dummy_desc)
+        self._main_client = main_client
+        self._peer_id = peer_id
+        self._tunnel = tunnel
+        
+        self._mesh_connection = MeshConnection(main_client, peer_id, tunnel, self._encoder, self._decoder)
+        self._connection = self._mesh_connection
+        self._session_token = "mesh"
+        
+        async def on_connection_message(conn, decoded_msg):
+            msg_type = decoded_msg.get_message_type_str()
+            if msg_type == "mesh_stream_data":
+                data = decoded_msg.get_data()
+                stream_name = data.get("stream_name")
+                stream_bytes = data.get("data")
+                if self._on_binary_stream:
+                    await self._on_binary_stream(stream_name, stream_bytes)
+                return
+                
+            await self._process_message(decoded_msg)
+            
+        self._mesh_connection.set_message_handler(on_connection_message)
+
+    async def connect(self) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        await self._mesh_connection.stop()
+
+    def send_binary_stream(self, stream_name: str, data: bytes):
+        """Route binary stream data over the mesh tunnel."""
+        asyncio.create_task(self.send("mesh_stream_data", {
+            "stream_name": stream_name,
+            "data": data
+        }))
