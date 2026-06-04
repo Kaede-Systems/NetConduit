@@ -792,17 +792,19 @@ impl RustQUICServer {
         Ok(())
     }
 
-    fn send_binary_stream(&self, client_id: String, stream_name: String, data: Vec<u8>) -> PyResult<()> {
+    fn send_binary_stream(&self, py: Python<'_>, client_id: String, stream_name: String, data: Vec<u8>) -> PyResult<()> {
         let conn = self.connections.lock().unwrap().get(&client_id).cloned();
         if let (Some(conn), Some(rt)) = (conn, &self.rt) {
-            rt.block_on(async move {
-                if let Ok((mut send, _)) = conn.open_bi().await {
-                    let name = stream_name.as_bytes();
-                    let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
-                    let _ = send.write_all(name).await;
-                    let _ = send.write_all(&data).await;
-                    let _ = send.finish();
-                }
+            py.allow_threads(|| {
+                rt.block_on(async move {
+                    if let Ok((mut send, _)) = conn.open_bi().await {
+                        let name = stream_name.as_bytes();
+                        let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
+                        let _ = send.write_all(name).await;
+                        let _ = send.write_all(&data).await;
+                        let _ = send.finish();
+                    }
+                });
             });
         }
         Ok(())
@@ -966,30 +968,34 @@ impl RustQUICClient {
         Ok(())
     }
 
-    fn send_message(&self, payload: Vec<u8>) -> PyResult<()> {
+    fn send_message(&self, py: Python<'_>, payload: Vec<u8>) -> PyResult<()> {
         if let (Some(conn), Some(rt)) = (&self.conn, &self.rt) {
             let conn = conn.clone();
-            rt.block_on(async move {
-                if let Ok(mut s) = conn.open_uni().await {
-                    let _ = s.write_all(&payload).await;
-                    let _ = s.finish();
-                }
+            py.allow_threads(|| {
+                rt.block_on(async move {
+                    if let Ok(mut s) = conn.open_uni().await {
+                        let _ = s.write_all(&payload).await;
+                        let _ = s.finish();
+                    }
+                });
             });
         }
         Ok(())
     }
 
-    fn send_binary_stream(&self, stream_name: String, data: Vec<u8>) -> PyResult<()> {
+    fn send_binary_stream(&self, py: Python<'_>, stream_name: String, data: Vec<u8>) -> PyResult<()> {
         if let (Some(conn), Some(rt)) = (&self.conn, &self.rt) {
             let conn = conn.clone();
-            rt.block_on(async move {
-                if let Ok((mut send, _)) = conn.open_bi().await {
-                    let name = stream_name.as_bytes();
-                    let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
-                    let _ = send.write_all(name).await;
-                    let _ = send.write_all(&data).await;
-                    let _ = send.finish();
-                }
+            py.allow_threads(|| {
+                rt.block_on(async move {
+                    if let Ok((mut send, _)) = conn.open_bi().await {
+                        let name = stream_name.as_bytes();
+                        let _ = send.write_all(&(name.len() as u32).to_be_bytes()).await;
+                        let _ = send.write_all(name).await;
+                        let _ = send.write_all(&data).await;
+                        let _ = send.finish();
+                    }
+                });
             });
         }
         Ok(())
