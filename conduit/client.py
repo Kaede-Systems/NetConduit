@@ -851,6 +851,11 @@ class Client:
                         local_server._rpc_registry = peer_client._rpc_registry
                         local_server._rpc_dispatcher = peer_client._rpc_dispatcher
                         
+                        @local_server.on_binary_stream
+                        async def forward_binary_stream(client_id, stream_name, data):
+                            if peer_client._on_binary_stream:
+                                await peer_client._on_binary_stream(stream_name, data)
+                        
                         if self._on_p2p_established:
                             res = self._on_p2p_established(peer_client)
                             if inspect.isawaitable(res):
