@@ -40,7 +40,7 @@ NetConduit is a QUIC-based networking library with a native Rust core, Ed25519 m
 ## Support
 
 - **GitHub**: [DarsheeeGamer/NetConduit](https://github.com/DarsheeeGamer/NetConduit)
-- **Email**: vedanthnath@gmail.com
+- **Email**: cleaverdeath@gmail.com
 
 ## License
 
