@@ -1,373 +1,304 @@
-# Protocol Documentation
+# Protocol Specification
 
-Technical specification for the netconduit binary protocol.
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Header Format](#header-format)
-3. [Message Types](#message-types)
-4. [Message Flags](#message-flags)
-5. [Payload Format](#payload-format)
-6. [Authentication Flow](#authentication-flow)
-7. [Heartbeat Protocol](#heartbeat-protocol)
-8. [Backpressure Flow Control](#backpressure-flow-control)
+Technical reference for the NetConduit wire protocol.
 
 ---
 
 ## Overview
 
-netconduit uses a custom binary protocol optimized for low-latency bidirectional communication.
+NetConduit uses QUIC as the transport layer. All application data is carried in Protobuf-encoded `Packet` messages. Three delivery modes are available on each QUIC connection:
 
-### Key Features
-
-- **Binary Header**: 32-byte fixed header for fast parsing
-- **MessagePack Payload**: Efficient binary serialization
-- **Correlation IDs**: Match requests with responses
-- **Compression**: Optional zlib compression
-- **Version Support**: Protocol versioning for compatibility
+| Mode | QUIC primitive | Guarantee |
+|------|---------------|-----------|
+| Message | uni-stream | Reliable, ordered per-stream |
+| BinaryStream / DuplexStream | bi-stream | Reliable, ordered |
+| Datagram | QUIC datagram | Unreliable, unordered, ~1200 B max |
 
 ---
 
-## Header Format
+## Wire Frame Format
 
-Every message starts with a 32-byte header:
+### Stream frames (uni-stream and bi-stream)
 
 ```
- 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|     Magic (4 bytes)  = "CNDT"                                 |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|    Version    |     Type      |           Flags               |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       Payload Length (4 bytes)                |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                    Correlation ID (8 bytes)                   |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                                                               |
-|                      Timestamp (8 bytes)                      |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       Reserved (4 bytes)                      |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ ┌─────────────────────────────────────────────────┐
+ │  PROTO_MAGIC     5 bytes   "NCON\x01"           │
+ │  pkt_len         4 bytes   big-endian uint32     │
+ │  Packet          pkt_len   protobuf-encoded      │
+ └─────────────────────────────────────────────────┘
 ```
 
-### Field Description
+`PROTO_MAGIC = 0x4E 0x43 0x4F 0x4E 0x01` — last byte encodes protocol version.
 
-| Field | Offset | Size | Description |
-|-------|--------|------|-------------|
-| Magic | 0 | 4 | Magic bytes `"CNDT"` (0x434E4454) |
-| Version | 4 | 1 | Protocol version (currently 1) |
-| Type | 5 | 1 | Message type (see below) |
-| Flags | 6 | 2 | Message flags (see below) |
-| Length | 8 | 4 | Payload length in bytes |
-| Correlation ID | 12 | 8 | Request/response matching ID |
-| Timestamp | 20 | 8 | Unix timestamp (milliseconds) |
-| Reserved | 28 | 4 | Reserved for future use |
+Bi-streams open with one full frame (magic + len + Packet). Long-lived duplex streams send subsequent messages as `len + Packet` only (no repeated magic).
 
-### Header Constants
+### Datagram frames
 
-```python
-MAGIC = b"CNDT"           # Magic bytes
-PROTOCOL_VERSION = 1       # Current protocol version
-HEADER_SIZE = 32          # Header size in bytes
+```
+ ┌─────────────────────────────────────────────────┐
+ │  PROTO_MAGIC     5 bytes   "NCON\x01"           │
+ │  Packet          remaining  protobuf-encoded     │
+ └─────────────────────────────────────────────────┘
+```
+
+No length prefix — the datagram boundary is the packet boundary.
+
+---
+
+## Packet Message
+
+Defined in `src/protocol.proto`:
+
+```protobuf
+message Packet {
+    uint32    version        = 1;   // Must equal PROTO_VERSION (1)
+    PacketType type          = 2;   // Payload type discriminator
+    uint32    flags          = 3;   // Bitfield — see below
+    uint64    correlation_id = 4;   // RPC request/response matching; file transfer group
+    uint64    timestamp      = 5;   // Unix milliseconds at sender
+    bytes     payload        = 6;   // Application data (may be compressed)
+    string    src_id         = 7;   // Sender peer ID (32-char hex)
+    string    dst_id         = 8;   // Destination peer ID for mesh routing
+    bool      is_mesh        = 9;   // True when packet was relayed through a mesh node
+    bytes     checksum       = 10;  // Blake3-128 hex of uncompressed payload (FLAG_HAS_CHECKSUM)
+    uint64    sequence_id    = 11;  // Monotonic per (connection, stream_id)
+    uint32    stream_id      = 12;  // Logical channel (0 = default)
+    string    channel_name   = 13;  // Channel name for STREAM_DATA; empty for MESSAGE
+    bytes     signature      = 14;  // Ed25519 64-byte signature (FLAG_SIGNED)
+    uint32    ttl            = 15;  // Mesh hop limit; decremented at each relay; drop at 0
+}
 ```
 
 ---
 
-## Message Types
+## Packet Types
 
 | Value | Name | Description |
 |-------|------|-------------|
-| 0x01 | `MESSAGE` | Regular message |
-| 0x02 | `RPC_REQUEST` | RPC call request |
-| 0x03 | `RPC_RESPONSE` | RPC call response |
-| 0x04 | `RPC_ERROR` | RPC error response |
-| 0x05 | `HEARTBEAT_PING` | Keep-alive ping |
-| 0x06 | `HEARTBEAT_PONG` | Keep-alive pong |
-| 0x07 | `PAUSE` | Flow control pause |
-| 0x08 | `RESUME` | Flow control resume |
-| 0x10 | `AUTH_REQUEST` | Authentication request |
-| 0x11 | `AUTH_SUCCESS` | Authentication success |
-| 0x12 | `AUTH_FAILURE` | Authentication failure |
-| 0x13 | `AUTH_CHALLENGE` | Auth challenge (optional) |
-| 0x14 | `AUTH_RESPONSE` | Auth challenge response |
-| 0x20 | `DISCONNECT` | Graceful disconnect |
-| 0xFF | `ERROR` | Protocol error |
+| 0 | `UNKNOWN` | Invalid / unset |
+| 1 | `MESSAGE` | Raw application message |
+| 2 | `STREAM_DATA` | Named binary stream chunk |
+| 3 | `FILE_CHUNK` | File transfer chunk (correlation_id groups chunks) |
+| 4 | `RPC_REQUEST` | RPC call |
+| 5 | `RPC_RESPONSE` | RPC result |
+| 6 | `RPC_ERROR` | RPC failure |
+| 7 | `PING` | Keep-alive probe |
+| 8 | `PONG` | Keep-alive reply |
+| 9 | `AUTH_REQUEST` | Authentication handshake |
+| 10 | `AUTH_RESPONSE` | Authentication result |
+| 11 | `CLOSE` | Graceful connection close |
+| 12 | `ACK` | Explicit acknowledgment |
+| 13 | `NACK` | Negative acknowledgment |
+| 14 | `PAUSE` | Flow control pause |
+| 15 | `RESUME` | Flow control resume |
 
 ---
 
-## Message Flags
+## Flags Field
 
-Flags are a 16-bit field with the following bits:
+`Packet.flags` is a 32-bit bitfield:
 
-| Bit | Name | Description |
-|-----|------|-------------|
-| 0 | `COMPRESSED` | Payload is zlib compressed |
-| 1 | `ENCRYPTED` | Payload is encrypted (reserved) |
-| 2 | `PRIORITY_HIGH` | High priority message |
-| 3 | `PRIORITY_LOW` | Low priority message |
-| 4 | `REQUIRES_ACK` | Requires acknowledgment |
-| 5-15 | Reserved | Reserved for future use |
+| Bit | Constant | Value | Meaning |
+|-----|----------|-------|---------|
+| 0 | `FLAG_COMPRESS_LZ4` | `0x01` | Payload is LZ4-compressed (`lz4_flex::compress_prepend_size`) |
+| 1 | `FLAG_COMPRESS_ZSTD` | `0x02` | Payload is Zstd-compressed |
+| 2 | `FLAG_UNRELIABLE` | `0x04` | Sent via QUIC datagram (unreliable channel) |
+| 3 | `FLAG_HAS_CHECKSUM` | `0x08` | `checksum` field is populated |
+| 4 | `FLAG_LITTLE_ENDIAN` | `0x10` | Payload byte order is little-endian (default: big-endian) |
+| 5 | `FLAG_DUPLEX` | `0x20` | Opening packet of a long-lived bidirectional stream |
+| 6 | `FLAG_SIGNED` | `0x40` | `signature` field is populated with a 64-byte Ed25519 signature |
 
-### Flag Constants
-
-```python
-FLAG_COMPRESSED = 0x0001
-FLAG_ENCRYPTED = 0x0002
-FLAG_PRIORITY_HIGH = 0x0004
-FLAG_PRIORITY_LOW = 0x0008
-FLAG_REQUIRES_ACK = 0x0010
-```
+Bits 0 and 1 are mutually exclusive (LZ4 and Zstd cannot both be set).
 
 ---
 
-## Payload Format
+## Compression Pipeline
 
-Payloads are serialized using MessagePack.
-
-### Regular Message (MESSAGE)
-
-```python
-{
-    "type": str,     # Message type string
-    "data": dict,    # Message payload
-}
+```
+  payload (raw bytes)
+        │
+        ▼
+  select_codec(len):
+    < 64 B   → NONE  (pass through)
+    64–255 B → LZ4
+    ≥ 256 B  → ZSTD
+        │
+        ▼  (for ZSTD, Auto policy only)
+  is_likely_compressible? (4 KB LZ4 entropy probe)
+    no  → return raw (skip zstd entirely)
+    yes → continue
+        │
+        ▼
+  compress:
+    LZ4  → lz4_flex::compress_prepend_size
+    ZSTD → zstd level-1  (~400 MB/s single-thread)
+          → zstd MT (≥ 32 MB only, up to 8 threads)
+        │
+        ▼
+  if compressed >= original → send raw (no expansion)
+  if compressed < original  → send compressed, set flag
 ```
 
-Example:
-```python
-{
-    "type": "chat_message",
-    "data": {
-        "from": "user123",
-        "message": "Hello!",
-        "timestamp": 1702500000
-    }
-}
-```
+### Codec selection thresholds
 
-### RPC Request (RPC_REQUEST)
-
-```python
-{
-    "method": str,   # Method name
-    "params": dict,  # Method parameters
-}
-```
-
-Example:
-```python
-{
-    "method": "add",
-    "params": {"a": 10, "b": 20}
-}
-```
-
-### RPC Response (RPC_RESPONSE)
-
-```python
-{
-    "success": True,
-    "result": any,   # Return value
-}
-```
-
-Example:
-```python
-{
-    "success": True,
-    "result": 30
-}
-```
-
-### RPC Error (RPC_ERROR)
-
-```python
-{
-    "success": False,
-    "error": str,    # Error message
-    "code": int,     # Error code (optional)
-    "details": dict, # Additional details (optional)
-}
-```
-
-Example:
-```python
-{
-    "success": False,
-    "error": "Method not found: unknown_method",
-    "code": 4000
-}
-```
-
-### Auth Request (AUTH_REQUEST)
-
-```python
-{
-    "password_hash": str,  # SHA-256 hash of password
-    "client_info": {
-        "name": str,       # Client name
-        "version": str,    # Client version
-    }
-}
-```
-
-### Auth Success (AUTH_SUCCESS)
-
-```python
-{
-    "session_token": str,  # Session token for reconnection
-    "server_info": {
-        "name": str,       # Server name
-        "version": str,    # Server version
-    }
-}
-```
-
-### Auth Failure (AUTH_FAILURE)
-
-```python
-{
-    "reason": str,         # Failure reason
-    "retry_allowed": bool, # Whether retry is allowed
-}
-```
+| Payload size | Codec | Rationale |
+|-------------|-------|-----------|
+| < 64 B | None | Compression overhead exceeds savings |
+| 64–255 B | LZ4 | Fast, in-place, minimal overhead |
+| ≥ 256 B | Zstd level 1 | Better ratio for larger data; level 1 ≈ 400 MB/s |
+| ≥ 32 MB | Zstd MT | Multi-threaded; below this MT dispatch overhead dominates |
 
 ---
 
-## Authentication Flow
+## Framing Detail: Duplex Streams
 
+A duplex stream uses a QUIC bi-directional stream that stays open for the lifetime of the logical channel.
+
+**Opening frame** (client → server, from `open_duplex_stream()`):
 ```
-Client                                 Server
-  |                                      |
-  |-------- TCP Connect ---------------->|
-  |                                      |
-  |-------- AUTH_REQUEST --------------->|
-  |         {password_hash, client_info} |
-  |                                      |
-  |         Verify password              |
-  |                                      |
-  |<------- AUTH_SUCCESS ----------------|
-  |         {session_token, server_info} |
-  |                                      |
-  |         (Start normal communication) |
-  |                                      |
+PROTO_MAGIC[5] + pkt_len[4] + Packet {
+    type: STREAM_DATA,
+    flags: FLAG_DUPLEX,
+    channel_name: "<name>",
+    ...
+}
 ```
 
-### Password Hashing
-
-Passwords are hashed client-side before transmission:
-
-```python
-import hashlib
-
-password_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+**Subsequent messages** (either direction, from `send_data()`):
 ```
+pkt_len[4] + Packet {
+    type: STREAM_DATA,
+    flags: <compress flags> | FLAG_DUPLEX,
+    payload: <compressed>,
+    ...
+}
+```
+
+No magic prefix on continuation frames. The stream is closed by calling `finish()` on the send half.
 
 ---
 
-## Heartbeat Protocol
+## Ed25519 Packet Signing
 
-Heartbeats maintain connection health and detect dead connections.
+Signing covers `Packet.payload` only. The signature does NOT cover other fields (flags, timestamp, etc.) — those are transport metadata, not application content.
 
-### Flow
-
+**Sign:**
 ```
-Client                                 Server
-  |                                      |
-  | <------ HEARTBEAT_PING ------------- |
-  |                                      |
-  | ------- HEARTBEAT_PONG ----------> |
-  |                                      |
-  |       (repeat at interval)           |
+pkt.src_id    = identity.peer_id    // 32-char hex (first 16 bytes of public key)
+pkt.signature = Ed25519.sign(pkt.payload)
+pkt.flags    |= FLAG_SIGNED
 ```
 
-### Configuration
+**Verify:**
+```
+if FLAG_SIGNED not set → accept (unsigned packets are not rejected)
+else → Ed25519.verify(public_key, pkt.payload, pkt.signature)
+```
 
-- **Interval**: How often pings are sent (default: 30s)
-- **Timeout**: Maximum time without pong before disconnect (default: 90s)
+`KeyStore.verify()` additionally rejects packets with `FLAG_SIGNED` if the `src_id` is not in the trusted-peer map.
 
 ---
 
-## Backpressure Flow Control
+## Mesh Routing
 
-Flow control prevents buffer overflow when sender is faster than receiver.
-
-### Watermarks
-
-- **High Watermark**: Buffer fill ratio to trigger pause (default: 0.8)
-- **Low Watermark**: Buffer fill ratio to trigger resume (default: 0.5)
-
-### Flow
+The server relays packets when `Packet.dst_id` is non-empty and names a different connected peer.
 
 ```
-Sender                                 Receiver
-  |                                      |
-  |------- MESSAGE ---------------------->|
-  |------- MESSAGE ---------------------->|
-  |------- MESSAGE ---------------------->| Buffer filling
-  |                                      |
-  |<------ PAUSE -------------------------| High watermark reached
-  |                                      |
-  |       (sender stops sending)         |
-  |                                      |
-  |<------ RESUME ------------------------| Low watermark reached
-  |                                      |
-  |------- MESSAGE ---------------------->| Resume sending
-  |                                      |
+Client A → Server → Client B
+  Packet { dst_id: "peer_id_B", ttl: 16, ... }
+
+Server:
+  if dst_id != "" and dst_id != src_conn_id:
+      if ttl == 0: drop
+      lookup connections[dst_id]
+      fwd = pkt.clone()
+      fwd.is_mesh = true
+      fwd.ttl     = ttl - 1
+      forward via open_uni() to dst connection
+      return   ← do NOT deliver locally
 ```
+
+`MESH_DEFAULT_TTL = 16`. Set `Packet.ttl` explicitly to control routing depth.
 
 ---
 
-## Wire Format Example
+## Other Protobuf Messages
 
-Example of a complete message in hex:
+### RpcRequest / RpcResponse
 
+```protobuf
+message RpcRequest {
+    string method = 1;
+    bytes  params = 2;   // application-defined serialization
+}
+
+message RpcResponse {
+    bool   success = 1;
+    bytes  result  = 2;
+    string error   = 3;
+    int32  code    = 4;
+}
 ```
-Header (32 bytes):
-43 4E 44 54    # Magic: "CNDT"
-01             # Version: 1
-02             # Type: RPC_REQUEST
-00 00          # Flags: none
-00 00 00 1A    # Length: 26 bytes
-00 00 00 00 00 00 00 01  # Correlation ID: 1
-00 00 01 9B 18 DA A2 B4  # Timestamp
-00 00 00 00    # Reserved
 
-Payload (26 bytes - MessagePack encoded):
-82             # fixmap with 2 entries
-A6 6D 65 74 68 6F 64  # "method"
-A3 61 64 64    # "add"
-A6 70 61 72 61 6D 73  # "params"
-82             # fixmap with 2 entries
-A1 61          # "a"
-0A             # 10
-A1 62          # "b"
-14             # 20
+Encode an `RpcRequest` into `Packet.payload` with `type = RPC_REQUEST`. Echo `correlation_id` in the response.
+
+### AuthRequest / AuthResponse
+
+```protobuf
+message AuthRequest {
+    string password_hash    = 1;
+    string protocol_version = 2;
+    map<string, string> client_info = 3;
+}
+
+message AuthResponse {
+    bool   success            = 1;
+    string session_token      = 2;
+    string reason             = 3;
+    uint32 heartbeat_interval = 4;
+    map<string, string> server_info = 5;
+}
 ```
+
+### FileChunk
+
+```protobuf
+message FileChunk {
+    uint32 chunk_index  = 1;
+    uint32 total_chunks = 2;
+    bytes  data         = 3;
+    string filename     = 4;
+    uint64 file_size    = 5;
+}
+```
+
+Group chunks with a shared `correlation_id` in the outer `Packet`.
 
 ---
 
-## Compression
+## Protocol Constants
 
-When compression is enabled (FLAG_COMPRESSED set):
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PROTO_VERSION` | 1 | Protocol version encoded in every `Packet.version` |
+| `PROTO_MAGIC` | `"NCON\x01"` | 5-byte stream prefix |
+| `MAX_MSG_SIZE` | 10 MB | Maximum uni-stream message size |
+| `MAX_STREAM_SIZE` | 100 MB | Maximum bi-stream payload |
+| `MAX_CONNECTIONS` | 1024 | Default server connection cap |
+| `MESH_DEFAULT_TTL` | 16 | Default hop limit for routed packets |
+| `ZSTD_MT_THRESHOLD` | 32 MB | Minimum size for multi-threaded Zstd |
 
-1. Payload is compressed with zlib (level 6)
-2. Compressed data replaces original payload
-3. Length field reflects compressed size
-4. Small payloads (<100 bytes) may not compress
+---
 
-### Compression Check
+## TLS / QUIC Layer
 
-```python
-import zlib
-
-if len(payload) > 100:
-    compressed = zlib.compress(payload, level=6)
-    if len(compressed) < len(payload):
-        # Use compressed
-        flags |= FLAG_COMPRESSED
-        payload = compressed
-```
+- TLS 1.3 (enforced by QUIC)
+- ALPN protocol ID: `"netconduit"`
+- Server generates a self-signed Ed25519 certificate at startup (`rcgen`)
+- Clients default to `DummyVerifier` (skip cert verification) — suitable for LAN/dev
+- Production use: call `ConduitClient::connect_pinned()` with the server's DER cert bytes
+- Session resumption (0-RTT) enabled client-side via `ClientSessionMemoryCache` (256 entries)
+- Keep-alive: 15-second interval, 60-second idle timeout
+- Max concurrent bi-streams per connection: 4096
+- Max concurrent uni-streams per connection: 4096
+- Stream receive window: 16 MB per stream, 64 MB connection-wide

@@ -1,0 +1,32 @@
+# flutter_rust_bridge codegen configuration for NetConduit
+# Run from the repo root: flutter_rust_bridge_codegen generate
+
+rust_input:
+  - "netconduit_core/src/frb_api.rs"
+
+dart_output:
+  - "flutter/netconduit/lib/src/frb_generated.dart"
+
+rust_output:
+  - "netconduit_core/src/frb_generated.rs"
+
+c_output:
+  - "flutter/netconduit/ios/netconduit.h"
+  - "flutter/netconduit/macos/netconduit.h"
+
+# Extra headers for Android / Linux / Windows
+extra_headers:
+  - "flutter/netconduit/android/src/main/jniLibs/.gitkeep"
+
+# Features to enable when parsing the Rust crate
+rust_features:
+  - "flutter"
+
+# Where to find the Cargo.toml for the Rust crate
+manifest_path: "netconduit_core/Cargo.toml"
+
+# Whether to add #[allow(unused)] to generated code
+add_mod_to_lib: true
+
+# Use the new FRB v2 generator
+frb_dart_class_name: RustLib

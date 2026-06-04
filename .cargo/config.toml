@@ -1,0 +1,21 @@
+# Hardware-accelerated build configuration for NetConduit.
+#
+# This CPU (Intel i5-12450HX) has:
+#   AES-NI   — hardware AES (used by aws-lc-rs for QUIC encryption)
+#   VAES     — vectorized AES-NI, 256-bit parallel AES (4-8x AES-GCM speedup)
+#   AVX2     — 256-bit SIMD (zstd, lz4, blake3 auto-vectorization)
+#   SHA-NI   — hardware SHA256/SHA1
+#   VPCLMULQDQ — vectorized GCM polynomial multiplication
+#   PCLMULQDQ  — carry-less multiplication
+#
+# target-cpu=native compiles for THIS machine's exact CPU feature set.
+# For a portable binary that still uses AVX2/AES-NI, use x86-64-v3 instead.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=native",       # enable all CPU features (VAES, AVX2, SHA-NI, etc.)
+    "-C", "opt-level=3",             # max optimization (redundant in --release but explicit)
+]
+
+# Uncomment for portable release builds targeting modern x86_64 (AVX2+AES-NI, no VAES):
+# rustflags = ["-C", "target-cpu=x86-64-v3"]

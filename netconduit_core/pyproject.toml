@@ -3,11 +3,50 @@ requires = ["maturin>=1.13,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "netconduit_core"
+name = "netconduit-core"
+version = "4.0.0"
+description = "High-performance QUIC networking core — Rust extension with Protobuf framing, Ed25519 mesh security, LZ4/Zstd compression, and hardware acceleration"
+readme = "../README.md"
+license = { text = "MIT" }
 requires-python = ">=3.8"
+authors = [
+    { name = "Kaede Dev - Kento Hinode", email = "cleaverdeath@gmail.com" }
+]
+maintainers = [
+    { name = "Kaede Dev - Kento Hinode", email = "cleaverdeath@gmail.com" }
+]
+keywords = [
+    "quic", "networking", "rust", "protobuf", "compression",
+    "ed25519", "mesh", "p2p", "ffi",
+]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/DarsheeeGamer/NetConduit"
+Repository = "https://github.com/DarsheeeGamer/NetConduit"
+Documentation = "https://github.com/DarsheeeGamer/NetConduit/tree/main/documentation"
+Issues = "https://github.com/DarsheeeGamer/NetConduit/issues"
+Changelog = "https://github.com/DarsheeeGamer/NetConduit/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+# Activate the python feature (pyo3 bindings) when building via maturin.
+features = ["python"]
+# Module name inside the package
+module-name = "netconduit_core"

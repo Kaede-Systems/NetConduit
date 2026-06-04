@@ -1,0 +1,42 @@
+name: netconduit
+description: >-
+  NetConduit — high-throughput QUIC transport for Flutter.
+  Peer-to-peer, mesh, and client-server networking with automatic
+  compression and STUN-based hole punching. Powered by Rust via FFI.
+version: 0.1.0
+homepage: https://github.com/Kaede-Systems/NetConduit
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_rust_bridge: "^2.0.0"
+  ffi: ^2.1.0
+  meta: ^1.11.0
+  freezed_annotation: ">=1.0.0 <3.0.0"
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  freezed: ">=1.0.0 <3.0.0"
+  build_runner: ^2.4.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: systems.kaede.netconduit
+        pluginClass: NetconduitPlugin
+      ios:
+        pluginClass: NetconduitPlugin
+      linux:
+        dartPluginClass: NetConduitLinuxPlugin
+        pluginClass: NetconduitPlugin
+      macos:
+        pluginClass: NetconduitPlugin
+      windows:
+        pluginClass: NetconduitPlugin

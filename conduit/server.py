@@ -61,6 +61,7 @@ class Server:
             password=config.password,
             session_timeout=config.connection_timeout,
         )
+        self._valid_sessions = {}
         
         # Connection pool
         self._pool = ConnectionPool(max_connections=config.max_connections)
@@ -418,35 +419,48 @@ class Server:
             
         msg_type = decoded.message_type
         
-        # Handle authentication handshake
         if msg_type == MessageType.AUTH_REQUEST:
             payload = decoded.payload
             password_hash = payload.get("password_hash", "")
             client_info = dict(payload.get("client_info", {}))
             username = client_info.get("username")
+            session_token = client_info.get("session_token")
             
-            # Check credentials manager if configured
-            if self._credentials_manager and username:
-                if not self._credentials_manager.verify(username, password_hash):
-                    fail_msg = self._encoder.encode_auth_failure("Invalid credentials")
-                    self._rust_server.send_message(client_id, fail_msg)
-                    await self._pool.remove(client_id)
-                    return
-                profile = self._credentials_manager.get_profile(username)
-            else:
-                if not self._auth_handler.verify_simple(password_hash):
-                    # Send failure
-                    fail_msg = self._encoder.encode_auth_failure("Invalid password")
-                    self._rust_server.send_message(client_id, fail_msg)
-                    await self._pool.remove(client_id)
-                    return
-                # Grant admin profile by default for simple auth password
-                from .auth.credentials import UserProfile
-                profile = UserProfile(username="admin", roles={"admin"}, permissions={"read", "write"})
+            profile = None
+            is_token_auth = False
+            
+            # Check if token-based session resumption is attempted and valid
+            if session_token and session_token in self._valid_sessions:
+                username, profile = self._valid_sessions[session_token]
+                is_token_auth = True
+                logger.info(f"Client {client_id} successfully authenticated via token-based resumption (0-RTT style)")
+            
+            if not is_token_auth:
+                # Check credentials manager if configured
+                if self._credentials_manager and username:
+                    if not self._credentials_manager.verify(username, password_hash):
+                        fail_msg = self._encoder.encode_auth_failure("Invalid credentials")
+                        self._rust_server.send_message(client_id, fail_msg)
+                        await self._pool.remove(client_id)
+                        return
+                    profile = self._credentials_manager.get_profile(username)
+                else:
+                    if not self._auth_handler.verify_simple(password_hash):
+                        # Send failure
+                        fail_msg = self._encoder.encode_auth_failure("Invalid password")
+                        self._rust_server.send_message(client_id, fail_msg)
+                        await self._pool.remove(client_id)
+                        return
+                    # Grant admin profile by default for simple auth password
+                    from .auth.credentials import UserProfile
+                    profile = UserProfile(username="admin", roles={"admin"}, permissions={"read", "write"})
             
             # Create session
-            import uuid
-            session_token = str(uuid.uuid4())
+            if not is_token_auth:
+                import uuid
+                session_token = str(uuid.uuid4())
+                self._valid_sessions[session_token] = (username, profile)
+                
             from .transport.auth import Session
             session = Session(token=session_token, client_id=client_id, client_info=client_info)
             session.profile = profile  # Attach user profile to session
@@ -461,7 +475,6 @@ class Server:
                 }
             )
             self._rust_server.send_message(client_id, success_msg)
-            
             # Register with heartbeat manager
             def _make_sender(cid):
                 def _send(data): self._rust_server.send_message(cid, data)

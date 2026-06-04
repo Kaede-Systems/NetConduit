@@ -1,718 +1,319 @@
-# Client Documentation
+# Client Guide
 
-Complete guide to using the netconduit Client.
-
-## Table of Contents
-
-1. [Getting Started](#getting-started)
-2. [Client Configuration](#client-configuration)
-3. [Connection Management](#connection-management)
-4. [Sending Messages](#sending-messages)
-5. [Message Handlers](#message-handlers)
-6. [RPC Calls](#rpc-calls)
-7. [Lifecycle Hooks](#lifecycle-hooks)
-8. [Reconnection](#reconnection)
-9. [Error Handling](#error-handling)
-10. [Advanced Usage](#advanced-usage)
+Complete reference for `ConduitClient`.
 
 ---
 
-## Getting Started
+## Connect
 
-### Basic Client Setup
+### Development (accept any certificate)
 
-```python
-import asyncio
-from conduit import Client, ClientDescriptor
+```rust
+use tokio::sync::mpsc;
+use netconduit_core::core::{ConduitClient, ConduitEvent};
 
-# Create client with configuration
-client = Client(ClientDescriptor(
-    server_host="localhost",     # Required: Server address
-    server_port=8080,            # Required: Server port
-    password="your_password",    # Required: Auth password
-))
+let (tx, mut rx) = mpsc::channel::<ConduitEvent>(8192);
+let client = ConduitClient::connect(
+    "127.0.0.1",  // host
+    9000,          // port
+    10,            // connect timeout (seconds)
+    tx,            // event sink
+    None,          // local port (None = OS assigns)
+).await?;
+```
 
-async def main():
-    # Connect to server
-    connected = await client.connect()
-    
-    if connected:
-        print("Connected successfully!")
-        
-        # Do operations...
-        
-        await client.disconnect()
-    else:
-        print("Connection failed!")
+### Production (certificate pinning)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+```rust
+let cert_der: Vec<u8> = /* DER bytes from server.cert_der or out-of-band */ vec![...];
+
+let client = ConduitClient::connect_pinned(
+    "192.168.1.1", 9000, 10, tx, None, cert_der
+).await?;
+```
+
+### Bind to a specific local port (for hole-punching)
+
+```rust
+let client = ConduitClient::connect(
+    "peer.example.com", 9000, 10, tx, Some(44444)
+).await?;
 ```
 
 ---
 
-## Client Configuration
+## Event Loop
 
-### ClientDescriptor Options
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `server_host` | str | **Required** | Server hostname/IP |
-| `server_port` | int | **Required** | Server port |
-| `password` | str | **Required** | Authentication password |
-| `name` | str | `"conduit_client"` | Client name |
-| `version` | str | `"1.0.0"` | Client version |
-| `use_ipv6` | bool | `False` | Use IPv6 |
-| `connect_timeout` | float | `10.0` | Connection timeout |
-| `buffer_size` | int | `65536` | Socket buffer size |
-| `heartbeat_interval` | float | `30.0` | Heartbeat interval |
-| `heartbeat_timeout` | float | `90.0` | Heartbeat timeout |
-| `send_queue_size` | int | `1000` | Send queue size |
-| `receive_queue_size` | int | `1000` | Receive queue size |
-| `enable_compression` | bool | `False` | Enable compression |
-| `rpc_timeout` | float | `30.0` | Default RPC timeout |
-| `reconnect_enabled` | bool | `True` | Enable auto-reconnect |
-| `reconnect_attempts` | int | `5` | Max reconnect attempts (0 = unlimited) |
-| `reconnect_delay` | float | `1.0` | Initial reconnect delay |
-| `reconnect_delay_multiplier` | float | `2.0` | Backoff multiplier |
-| `reconnect_delay_max` | float | `60.0` | Max reconnect delay |
-
-### Example: Full Configuration
-
-```python
-from conduit import Client, ClientDescriptor
-
-client = Client(ClientDescriptor(
-    # Connection
-    server_host="game.example.com",
-    server_port=9000,
-    password="game_secret_key",
-    
-    # Identity
-    name="GameClient",
-    version="2.0.0",
-    
-    # Timeouts
-    connect_timeout=5.0,
-    rpc_timeout=10.0,
-    
-    # Heartbeat
-    heartbeat_interval=15.0,
-    heartbeat_timeout=45.0,
-    
-    # Reconnection
-    reconnect_enabled=True,
-    reconnect_attempts=10,
-    reconnect_delay=2.0,
-    reconnect_delay_max=30.0,
-    
-    # Performance
-    buffer_size=131072,
-    enable_compression=True,
-))
-```
-
----
-
-## Connection Management
-
-### Connect and Check Status
-
-```python
-# Connect to server
-connected = await client.connect()
-
-# Check connection status
-if client.is_connected:
-    print("Connected!")
-    
-if client.is_authenticated:
-    print("Authenticated!")
-
-# Get connection state
-from conduit import ConnectionState
-state = client.state
-print(f"State: {state.name}")
-```
-
-### Connection States
-
-| State | Description |
-|-------|-------------|
-| `DISCONNECTED` | Not connected |
-| `CONNECTING` | Connection in progress |
-| `AUTHENTICATING` | Auth handshake in progress |
-| `CONNECTED` | Connected but not active |
-| `ACTIVE` | Ready for communication |
-| `PAUSED` | Paused (backpressure) |
-| `CLOSING` | Closing connection |
-| `CLOSED` | Connection closed |
-| `FAILED` | Connection failed |
-
-### Disconnect
-
-```python
-# Gracefully disconnect
-await client.disconnect()
-
-# Check status
-print(f"Connected: {client.is_connected}")  # False
-```
-
-### Server Information
-
-```python
-# After connecting, access server info
-server_info = client.server_info
-print(f"Server name: {server_info.get('name')}")
-print(f"Server version: {server_info.get('version')}")
-
-# Session token
-token = client.session_token
-print(f"Session: {token}")
-```
-
-### Connection Health
-
-```python
-# Get health status
-health = client.health()
-print(f"Connected: {health['connected']}")
-print(f"State: {health['state']}")
-print(f"Authenticated: {health['authenticated']}")
-print(f"Reconnect attempts: {health['reconnect_attempts']}")
-```
-
----
-
-## Sending Messages
-
-### Send a Message
-
-```python
-# Send message to server
-await client.send("chat_message", {
-    "message": "Hello, server!",
-    "timestamp": time.time(),
-})
-```
-
-### Send with Different Types
-
-```python
-# Send player position
-await client.send("player_move", {
-    "x": 100.5,
-    "y": 200.0,
-    "z": 0.0,
-})
-
-# Send game action
-await client.send("player_action", {
-    "action": "attack",
-    "target_id": "enemy_001",
-    "weapon": "sword",
-})
-
-# Send settings update
-await client.send("update_settings", {
-    "music_volume": 0.8,
-    "sfx_volume": 1.0,
-    "notifications": True,
-})
-```
-
----
-
-## Message Handlers
-
-### Register Message Handler
-
-```python
-@client.on("server_announcement")
-async def handle_announcement(data):
-    """
-    Handle incoming announcement from server.
-    
-    Args:
-        data: Message payload from server
-    """
-    print(f"Announcement: {data['message']}")
-
-@client.on("chat_message")
-async def handle_chat(data):
-    sender = data.get("from", "Unknown")
-    message = data.get("message", "")
-    print(f"[{sender}]: {message}")
-
-@client.on("player_joined")
-async def handle_player_joined(data):
-    player_id = data["player_id"]
-    print(f"Player {player_id} joined the game!")
-```
-
-### Handle Game Events
-
-```python
-@client.on("game_state")
-async def handle_game_state(data):
-    """Handle game state updates."""
-    players = data.get("players", [])
-    scores = data.get("scores", {})
-    
-    for player in players:
-        score = scores.get(player["id"], 0)
-        print(f"{player['name']}: {score} points")
-
-@client.on("damage_received")
-async def handle_damage(data):
-    """Handle damage notification."""
-    amount = data["amount"]
-    source = data["source"]
-    current_health = data["current_health"]
-    
-    print(f"Took {amount} damage from {source}! HP: {current_health}")
-
-@client.on("item_collected")
-async def handle_item(data):
-    """Handle item collection."""
-    item_name = data["item"]["name"]
-    quantity = data.get("quantity", 1)
-    print(f"Collected {quantity}x {item_name}")
-```
-
----
-
-## RPC Calls
-
-### Basic RPC Call
-
-```python
-from conduit import data
-
-# Call RPC method
-result = await client.rpc.call("add", args=data(a=10, b=20))
-print(f"Result: {result}")  # 30
-
-# Call with float arguments
-result = await client.rpc.call("multiply", args=data(x=3.5, y=2.0))
-print(f"Result: {result}")  # 7.0
-
-# Call with string arguments
-result = await client.rpc.call("greet", args=data(name="World"))
-print(f"Result: {result}")  # "Hello, World!"
-```
-
-### RPC with Complex Data
-
-```python
-# Send complex objects
-result = await client.rpc.call("create_user", args=data(
-    username="player1",
-    email="player1@example.com",
-    age=25,
-    metadata={
-        "country": "US",
-        "language": "en",
+```rust
+while let Some(event) = rx.recv().await {
+    match event {
+        ConduitEvent::Connect { client_id } => {
+            // client_id is empty string for client-side events
+            println!("connected");
+        }
+        ConduitEvent::Message { payload, .. } => {
+            println!("received: {} bytes", payload.len());
+        }
+        ConduitEvent::BinaryStream { name, payload, .. } => {
+            println!("stream '{name}': {} bytes", payload.len());
+        }
+        ConduitEvent::DuplexStreamOpen { mut stream, .. } => {
+            tokio::spawn(async move {
+                while let Ok(Some(data)) = stream.recv_data().await {
+                    println!("duplex: {}", String::from_utf8_lossy(&data));
+                }
+            });
+        }
+        ConduitEvent::Disconnect { .. } => {
+            println!("disconnected");
+            break;
+        }
     }
-))
-
-print(f"Created user: {result}")
-```
-
-### RPC with Timeout
-
-```python
-# Custom timeout for this call
-result = await client.rpc.call(
-    "slow_operation",
-    args=data(param="value"),
-    timeout=60.0  # 60 second timeout
-)
-```
-
-### Discover Available Methods
-
-```python
-# Get list of available RPC methods
-methods = await client.rpc.discover()
-
-print("Available RPC methods:")
-for method in methods:
-    print(f"  - {method['name']}: {method.get('description', 'No description')}")
-```
-
-### Handle RPC Errors
-
-```python
-from conduit.rpc.rpc_class import RPCError, RPCTimeout
-
-try:
-    result = await client.rpc.call("some_method", args=data(x=1))
-    print(f"Success: {result}")
-    
-except RPCTimeout:
-    print("RPC call timed out!")
-    
-except RPCError as e:
-    print(f"RPC error: {e.message}")
-    print(f"Error code: {e.code}")
-    if e.details:
-        print(f"Details: {e.details}")
-```
-
-### RPC Response Handling
-
-```python
-# Handle response with success/error format
-result = await client.rpc.call("get_user", args=data(user_id=123))
-
-if isinstance(result, dict):
-    if result.get("success"):
-        user = result.get("data")
-        print(f"User found: {user}")
-    else:
-        error = result.get("error")
-        print(f"Error: {error}")
+}
 ```
 
 ---
 
-## Lifecycle Hooks
+## Sending
 
-### Connect Hook
+### Raw message (uni-stream, reliable ordered)
 
-```python
-@client.on_connect
-async def on_connect(cli):
-    """Called when client connects to server."""
-    print("Connected to server!")
-    print(f"Server info: {cli.server_info}")
-    
-    # Initialize resources
-    await load_user_data()
-    
-    # Notify server we're ready
-    await cli.send("client_ready", {
-        "version": cli.config.version,
-    })
+```rust
+client.send_message(b"hello server").await?;
 ```
 
-### Disconnect Hook
+### Named binary stream (bi-stream, ephemeral)
 
-```python
-@client.on_disconnect
-async def on_disconnect(cli):
-    """Called when client disconnects."""
-    print("Disconnected from server")
-    
-    # Cleanup
-    await save_user_data()
-    
-    # Update UI
-    show_disconnected_message()
+```rust
+let data = std::fs::read("sensor.bin")?;
+client.send_binary_stream("sensor_data", data).await?;
 ```
 
-### Reconnect Hook
+### QUIC datagram (unreliable, ~1200 B max, lowest latency)
 
-```python
-@client.on_reconnect
-async def on_reconnect(cli):
-    """Called when client reconnects after disconnect."""
-    print("Reconnected to server!")
-    
-    # Re-sync state
-    await cli.send("request_sync", {})
-    
-    # Update UI
-    hide_reconnecting_overlay()
+```rust
+// Good for: game state, audio packets, periodic telemetry
+client.send_datagram(b"x=100:y=200:t=42").await?;
 ```
 
 ---
 
-## Reconnection
+## Full-Duplex Stream
 
-### Automatic Reconnection
+Open a persistent bidirectional channel. Both sides can send and receive simultaneously without the stream closing between messages.
 
-```python
-# Enable auto-reconnect (default is True)
-client = Client(ClientDescriptor(
-    server_host="localhost",
-    server_port=8080,
-    password="secret",
-    
-    # Reconnection settings
-    reconnect_enabled=True,
-    reconnect_attempts=5,       # Max attempts (0 = unlimited)
-    reconnect_delay=1.0,        # Initial delay (seconds)
-    reconnect_delay_multiplier=2.0,  # Exponential backoff
-    reconnect_delay_max=60.0,   # Max delay between attempts
-))
+```rust
+// Client opens the stream
+let mut stream = client.open_duplex_stream("chat").await?;
+
+// Send without closing
+stream.send_data(b"hello".to_vec()).await?;
+
+// Receive (blocks until data arrives)
+if let Some(reply) = stream.recv_data().await? {
+    println!("server said: {}", String::from_utf8_lossy(&reply));
+}
+
+// Close the send half when done (server can still send)
+stream.close().await?;
 ```
 
-### Disable Reconnection
+On the server side, the stream arrives as `ConduitEvent::DuplexStreamOpen { stream, .. }`.
 
-```python
-# Disable for single-shot connections
-client = Client(ClientDescriptor(
-    server_host="localhost",
-    server_port=8080,
-    password="secret",
-    reconnect_enabled=False,
-))
-```
+### Ping-pong example
 
-### Track Reconnection
-
-```python
-@client.on_disconnect
-async def on_disconnect(cli):
-    print("Disconnected! Waiting for reconnect...")
-
-@client.on_reconnect
-async def on_reconnect(cli):
-    health = cli.health()
-    attempts = health['reconnect_attempts']
-    print(f"Reconnected after {attempts} attempts!")
+```rust
+let mut stream = client.open_duplex_stream("ping").await?;
+for i in 0u64..10 {
+    stream.send_data(i.to_be_bytes().to_vec()).await?;
+    let reply = stream.recv_data().await?.unwrap();
+    let n = u64::from_be_bytes(reply.try_into().unwrap());
+    println!("pong: {n}");
+}
+stream.close().await?;
 ```
 
 ---
 
-## Error Handling
+## Signed Messages (Ed25519)
 
-### Connection Errors
+```rust
+use netconduit_core::security::{NodeIdentity, sign_packet, KeyStore};
+use netconduit_core::protocol::Packet;
+use netconduit_core::core::{PROTO_VERSION, FLAG_SIGNED};
 
-```python
-try:
-    connected = await client.connect()
-    if not connected:
-        print("Failed to connect - check credentials")
-        
-except ConnectionRefusedError:
-    print("Server is not running!")
-    
-except asyncio.TimeoutError:
-    print("Connection timed out!")
-    
-except Exception as e:
-    print(f"Connection error: {e}")
-```
+// Generate once, persist pkcs8_bytes() to disk
+let identity = NodeIdentity::generate()?;
 
-### RPC Errors
+// Restore from disk
+let identity = NodeIdentity::from_pkcs8(stored_pkcs8_bytes)?;
 
-```python
-from conduit.rpc.rpc_class import RPCError, RPCTimeout
+// Sign a packet before sending
+let mut pkt = Packet {
+    version: PROTO_VERSION,
+    payload: b"authenticated payload".to_vec(),
+    ..Default::default()
+};
+sign_packet(&mut pkt, &identity);
+// pkt.src_id    = identity.peer_id (32-char hex)
+// pkt.signature = 64-byte Ed25519 signature
+// pkt.flags    |= FLAG_SIGNED
 
-async def safe_rpc_call():
-    try:
-        result = await client.rpc.call("risky_operation", args=data(x=1))
-        return result
-        
-    except RPCTimeout:
-        print("Operation timed out")
-        return None
-        
-    except RPCError as e:
-        print(f"RPC failed: {e.message}")
-        return None
-```
-
-### Send Errors
-
-```python
-from conduit.exceptions import NotConnectedError
-
-try:
-    await client.send("message", {"data": "value"})
-except NotConnectedError:
-    print("Not connected to server!")
+// Verify on the receiving side
+let store = KeyStore::new();
+store.add(peer.peer_id.clone(), peer.public_key.clone());
+assert!(store.verify(&received_pkt));
 ```
 
 ---
 
-## Advanced Usage
+## Mesh Routing
 
-### IPv6 Connection
+Send a packet through the server to another peer:
 
-```python
-client = Client(ClientDescriptor(
-    server_host="::1",          # IPv6 localhost
-    server_port=8080,
-    password="secret",
-    use_ipv6=True,              # Enable IPv6
-))
-```
+```rust
+use netconduit_core::protocol::Packet;
+use netconduit_core::core::{PROTO_VERSION, MESH_DEFAULT_TTL, frame_packet};
 
-### Access Configuration
+let pkt = Packet {
+    version: PROTO_VERSION,
+    dst_id:  "192.168.1.10:55555".to_string(),  // target peer's client_id
+    ttl:     MESH_DEFAULT_TTL,
+    payload: b"routed message".to_vec(),
+    ..Default::default()
+};
 
-```python
-# Get client configuration
-config = client.config
-
-print(f"Client name: {config.name}")
-print(f"Server: {config.server_host}:{config.server_port}")
-print(f"RPC timeout: {config.rpc_timeout}")
-```
-
-### Connection Timeout
-
-```python
-# Short timeout for quick connection check
-client = Client(ClientDescriptor(
-    server_host="localhost",
-    server_port=8080,
-    password="secret",
-    connect_timeout=3.0,  # 3 second timeout
-    reconnect_enabled=False,
-))
-
-connected = await client.connect()
-if not connected:
-    print("Server not responding quickly")
+// Frame and send via uni-stream to server
+let frame = frame_packet(&pkt);
+let mut s = client.conn.open_uni().await?;
+s.write_all(&frame).await?;
+s.finish()?;
 ```
 
 ---
 
-## Complete Example
+## STUN / NAT Traversal
 
-```python
-#!/usr/bin/env python3
-"""Complete client example with all features."""
+Discover the external address and punch a UDP hole simultaneously:
 
-import asyncio
-import time
-from conduit import Client, ClientDescriptor, data
+```rust
+use netconduit_core::core::stun_punch_hole;
 
-# Configuration
-client = Client(ClientDescriptor(
-    server_host="localhost",
-    server_port=8080,
-    password="secret123",
-    name="ExampleClient",
-    version="1.0.0",
-    reconnect_enabled=True,
-    reconnect_attempts=3,
-))
+let external_addr = stun_punch_hole(
+    "stun.l.google.com:19302".to_string(),
+    44444,          // local UDP port
+    "".to_string(), // peer addr (empty = discovery only)
+)?;
+println!("External address: {external_addr}");
 
-
-# === Lifecycle Hooks ===
-
-@client.on_connect
-async def on_connect(cli):
-    print(f"Connected to {cli.server_info.get('name', 'server')}!")
-    
-    # Request initial data
-    stats = await cli.rpc.call("get_stats")
-    print(f"Server has {stats.get('data', {}).get('clients', 0)} clients")
-
-@client.on_disconnect
-async def on_disconnect(cli):
-    print("Disconnected from server")
-
-@client.on_reconnect
-async def on_reconnect(cli):
-    print("Reconnected!")
-
-
-# === Message Handlers ===
-
-@client.on("announcement")
-async def handle_announcement(msg):
-    print(f"[ANNOUNCEMENT] {msg.get('message')}")
-
-@client.on("chat")
-async def handle_chat(msg):
-    sender = msg.get("from", "Unknown")
-    text = msg.get("message", "")
-    print(f"[CHAT] {sender}: {text}")
-
-@client.on("pong")
-async def handle_pong(msg):
-    print(f"Received pong at {msg.get('time')}")
-
-
-# === Main ===
-
-async def main():
-    # Connect
-    connected = await client.connect()
-    if not connected:
-        print("Failed to connect!")
-        return
-    
-    print("Running client. Press Ctrl+C to exit.\n")
-    
-    try:
-        # Send ping
-        response = await client.send("ping", {})
-        print(f"Ping sent")
-        
-        # RPC call: calculate
-        result = await client.rpc.call("calculate", args=data(
-            a=100,
-            b=25,
-            operation="add"
-        ))
-        print(f"100 + 25 = {result.get('data', {}).get('result')}")
-        
-        # RPC call: multiply
-        result = await client.rpc.call("calculate", args=data(
-            a=7.5,
-            b=4.0,
-            operation="multiply"
-        ))
-        print(f"7.5 * 4.0 = {result.get('data', {}).get('result')}")
-        
-        # Send chat message
-        await client.send("chat", {"message": "Hello from client!"})
-        
-        # Discover available methods
-        methods = await client.rpc.discover()
-        print(f"\nAvailable RPC methods: {[m['name'] for m in methods]}")
-        
-        # Keep running to receive messages
-        while client.is_connected:
-            await asyncio.sleep(1)
-            
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    finally:
-        await client.disconnect()
-        print("Disconnected. Goodbye!")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+// Punch hole to peer
+let mapped = stun_punch_hole(
+    "stun.l.google.com:19302".to_string(),
+    44444,
+    "peer_external_addr:port".to_string(),
+)?;
 ```
 
 ---
 
-## Quick Reference
+## Connection Stats
 
-### Connection
-```python
-await client.connect()       # Connect to server
-await client.disconnect()    # Disconnect
-client.is_connected         # Check if connected
-client.is_authenticated     # Check if authenticated
-client.health()             # Get connection health
+```rust
+let stats = client.conn.stats();
+println!("UDP TX datagrams: {}", stats.udp_tx.datagrams);
+println!("UDP RX datagrams: {}", stats.udp_rx.datagrams);
+println!("UDP TX bytes:     {}", stats.udp_tx.bytes);
+println!("UDP RX bytes:     {}", stats.udp_rx.bytes);
 ```
 
-### Messaging
-```python
-await client.send(type, data)           # Send message
-@client.on("type")                      # Handle message
+---
+
+## Disconnect
+
+```rust
+client.disconnect().await;
+// Sends QUIC close frame; server receives ConduitEvent::Disconnect
 ```
 
-### RPC
+---
+
+## Python (netconduit_core extension)
+
 ```python
-result = await client.rpc.call(method, args=data(...))  # Call RPC
-methods = await client.rpc.discover()                    # List methods
+import netconduit_core
+
+client = netconduit_core.RustQUICClient()
+
+def on_event(event: str, client_id: str, payload: bytes):
+    if event == "connect":
+        print("Connected")
+    elif event == "message":
+        print(f"Received: {payload.decode()}")
+    elif event == "binary_stream":
+        print(f"Stream received: {len(payload)} bytes")
+    elif event == "disconnect":
+        print("Disconnected")
+
+connected = client.connect("127.0.0.1", 9000, 10, on_event)
+if connected:
+    client.send_message(b"hello from Python")
+    client.send_binary_stream("data", bytes(range(256)))
+
+# Check connection health
+print(f"Alive: {client.is_alive()}")
+print(f"Stats: {client.stats()}")
+
+client.disconnect()
 ```
 
-### Lifecycle
-```python
-@client.on_connect           # Connection hook
-@client.on_disconnect        # Disconnection hook
-@client.on_reconnect         # Reconnection hook
+See [Python Guide](../examples.md#python) for more complete examples.
+
+---
+
+## Complete Rust Example
+
+```rust
+use tokio::sync::mpsc;
+use netconduit_core::core::{ConduitClient, ConduitEvent};
+use netconduit_core::security::NodeIdentity;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let identity = NodeIdentity::generate()?;
+    println!("My peer ID: {}", identity.peer_id);
+
+    let (tx, mut rx) = mpsc::channel(8192);
+    let client = ConduitClient::connect("127.0.0.1", 9000, 10, tx, None).await?;
+
+    // Fire off a message
+    client.send_message(b"ping").await?;
+
+    // Open a duplex stream concurrently
+    let mut stream = client.open_duplex_stream("bidirectional").await?;
+    tokio::spawn(async move {
+        for i in 0..3u32 {
+            let _ = stream.send_data(format!("msg-{i}").into_bytes()).await;
+            if let Ok(Some(reply)) = stream.recv_data().await {
+                println!("stream reply: {}", String::from_utf8_lossy(&reply));
+            }
+        }
+        let _ = stream.close().await;
+    });
+
+    // Drain events
+    let mut count = 0;
+    while let Some(event) = rx.recv().await {
+        match event {
+            ConduitEvent::Message { payload, .. } => {
+                println!("msg: {}", String::from_utf8_lossy(&payload));
+                count += 1;
+                if count >= 3 { break; }
+            }
+            ConduitEvent::Disconnect { .. } => break,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
 ```

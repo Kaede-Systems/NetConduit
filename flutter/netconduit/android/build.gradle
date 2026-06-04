@@ -1,0 +1,120 @@
+group 'systems.kaede.netconduit'
+version '1.0'
+
+buildscript {
+    ext.kotlin_version = '1.9.0'
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.1.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    if (project.android.hasProperty("namespace")) {
+        namespace 'systems.kaede.netconduit'
+    }
+
+    compileSdkVersion 33
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        minSdkVersion 21   // Flutter minimum; QUIC requires Android 5+
+    }
+}
+
+// ─── Build Rust via Cargo ──────────────────────────────────────────────────────
+// Android cross-compilation uses cargo-ndk.  Install it with:
+//   cargo install cargo-ndk
+// And install Android NDK, then set ANDROID_NDK_HOME.
+
+def rustTargets = [
+    'aarch64-linux-android',
+    'armv7-linux-androideabi',
+    'x86_64-linux-android',
+    'i686-linux-android',
+]
+
+def abiMappings = [
+    'aarch64-linux-android'  : 'arm64-v8a',
+    'armv7-linux-androideabi': 'armeabi-v7a',
+    'x86_64-linux-android'   : 'x86_64',
+    'i686-linux-android'     : 'x86',
+]
+
+// Build Rust for each ABI if cargo-ndk is available
+task buildRust {
+    doLast {
+        def isRelease = gradle.startParameter.taskNames.any { it.contains('Release') }
+        def cargoArgs = ['cargo', 'ndk']
+
+        rustTargets.each { target ->
+            def abi = abiMappings[target]
+            cargoArgs += ['-t', abi]
+        }
+
+        cargoArgs += [
+            'build',
+            '--manifest-path', "${project.rootDir}/../../netconduit_core/Cargo.toml",
+            '--features', 'flutter',
+            '--no-default-features',
+        ]
+
+        if (isRelease) {
+            cargoArgs += ['--release']
+        }
+
+        def rustOutputDir = isRelease
+            ? "${project.rootDir}/../../netconduit_core/target/release"
+            : "${project.rootDir}/../../netconduit_core/target/debug"
+
+        exec {
+            workingDir "${project.rootDir}/../../netconduit_core"
+            commandLine cargoArgs
+            ignoreExitValue true   // Gracefully skip if cargo-ndk not installed
+        }
+
+        // Copy per-ABI .so files into jniLibs
+        rustTargets.each { target ->
+            def abi = abiMappings[target]
+            def soSrc = "${project.rootDir}/../../netconduit_core/target/${target}/${isRelease ? 'release' : 'debug'}/libnetconduit_core.so"
+            def soDst = "${projectDir}/src/main/jniLibs/${abi}/libnetconduit_core.so"
+
+            if (new File(soSrc).exists()) {
+                copy {
+                    from soSrc
+                    into new File(soDst).parentFile
+                    rename { 'libnetconduit_core.so' }
+                }
+            }
+        }
+    }
+}
+
+preBuild.dependsOn buildRust

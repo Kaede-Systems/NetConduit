@@ -59,6 +59,7 @@ class Client:
         
         # Session info
         self._session_token = None
+        self._cached_session_token = None
         self._server_info = {}
         
         # Lifecycle hooks
@@ -179,16 +180,20 @@ class Client:
             # Authenticate
             self._auth_future = self._loop.create_future()
             
-            password_hash = hashlib.sha256(
-                self._config.password.encode('utf-8')
-            ).hexdigest()
-            
             client_info = {
                 "name": self._config.name,
                 "version": self._config.version,
             }
             if self._config.username:
                 client_info["username"] = self._config.username
+
+            if self._cached_session_token:
+                client_info["session_token"] = self._cached_session_token
+                password_hash = ""
+            else:
+                password_hash = hashlib.sha256(
+                    self._config.password.encode('utf-8')
+                ).hexdigest()
 
             auth_msg = self._encoder.encode_auth_request(
                 password_hash=password_hash,
@@ -340,6 +345,7 @@ class Client:
         
         if msg_type == MessageType.AUTH_SUCCESS:
             self._session_token = decoded.payload.get("session_token")
+            self._cached_session_token = self._session_token
             self._server_info = dict(decoded.payload.get("server_info", {}))
             if self._connection:
                 self._connection.set_session(self._session_token)
@@ -348,6 +354,7 @@ class Client:
             return
 
         if msg_type == MessageType.AUTH_FAILURE:
+            self._cached_session_token = None
             if self._auth_future and not self._auth_future.done():
                 self._auth_future.set_result(False)
             return

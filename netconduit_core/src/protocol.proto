@@ -1,100 +1,124 @@
 syntax = "proto3";
-
 package netconduit;
 
-enum MessageType {
-    UNKNOWN      = 0;
-    MESSAGE      = 1;
-    RPC_REQUEST  = 2;
-    RPC_RESPONSE = 3;
-    RPC_ERROR    = 4;
-    HEARTBEAT_PING = 5;
-    HEARTBEAT_PONG = 6;
-    AUTH_REQUEST = 7;
-    AUTH_SUCCESS = 8;
-    AUTH_FAILURE = 9;
-    PAUSE        = 10;
-    RESUME       = 11;
-    ACK          = 12;
-    NACK         = 13;
-    CLOSE        = 14;
-    CLOSE_ACK    = 15;
-    RPC_LIST     = 16;
-    STREAM_DATA  = 17;
-    FILE_CHUNK   = 18;
+// Wire frame format (streams):   PROTO_MAGIC[5] + pkt_len_u32_be[4] + Packet[pkt_len]
+// Wire frame format (datagrams): PROTO_MAGIC[5] + Packet[remaining]
+// PROTO_MAGIC = 0x4E 0x43 0x4F 0x4E 0x01  ("NCON\x01")
+
+// ─── Packet type discriminator ─────────────────────────────────────────────────
+enum PacketType {
+    UNKNOWN       = 0;
+    // Raw application message — payload bytes, compressed per flags
+    MESSAGE       = 1;
+    // Named binary stream chunk — channel_name identifies the stream
+    STREAM_DATA   = 2;
+    // File transfer chunk — correlation_id groups chunks
+    FILE_CHUNK    = 3;
+    // RPC
+    RPC_REQUEST   = 4;
+    RPC_RESPONSE  = 5;
+    RPC_ERROR     = 6;
+    // Liveness
+    PING          = 7;
+    PONG          = 8;
+    // Auth
+    AUTH_REQUEST  = 9;
+    AUTH_RESPONSE = 10;
+    // Connection control
+    CLOSE         = 11;
+    ACK           = 12;
+    NACK          = 13;
+    PAUSE         = 14;
+    RESUME        = 15;
 }
 
+// ─── flags field bit assignments ───────────────────────────────────────────────
+// bit 0 (0x01): payload is LZ4-compressed
+// bit 1 (0x02): payload is Zstd-compressed
+// bit 2 (0x04): sent via unreliable (datagram) channel
+// bit 3 (0x08): checksum field is populated
+// bit 4 (0x10): payload byte order is little-endian (default: big-endian)
+
+// ─── Core frame ────────────────────────────────────────────────────────────────
 message Packet {
+    // Must equal PROTO_VERSION (1). Receivers reject mismatched versions.
     uint32 version        = 1;
-    MessageType type      = 2;
+
+    // Payload type discriminator.
+    PacketType type       = 2;
+
+    // Bitfield — see flag bit assignments above.
     uint32 flags          = 3;
+
+    // RPC: request ID echoed in response. File transfer: transfer group ID.
     uint64 correlation_id = 4;
+
+    // Unix milliseconds at sender.
     uint64 timestamp      = 5;
+
+    // Message body. Compressed when flags bits 0-1 are set.
     bytes  payload        = 6;
 
-    // Mesh routing
-    string route_src = 7;
-    string route_dst = 8;
-    bool   is_mesh   = 9;
-    bytes  checksum  = 10;
+    // Mesh routing: sender and destination peer IDs (empty for direct connections).
+    string src_id  = 7;
+    string dst_id  = 8;
 
-    // Ordering
-    // sequence_id: monotonically increasing per (connection, stream_id).
-    // Receivers use this to detect gaps and reorder out-of-order packets.
-    uint64 sequence_id = 11;
-    // stream_id: logical channel within a connection (0 = unordered/default).
-    // Independent sequence spaces per stream allow multiplexing ordered and
-    // unordered traffic on the same connection.
-    uint32 stream_id   = 12;
+    // True when this packet is being forwarded through a mesh relay.
+    bool   is_mesh = 9;
 
-    // Byte order marker for raw binary payloads (applies to payload content,
-    // not to the frame framing itself — framing is always big-endian).
-    // 0 = big-endian (default / network order)
-    // 1 = little-endian
-    uint32 byte_order  = 13;
+    // Blake3-128 hex digest of the uncompressed payload.
+    // Only valid when flags bit 3 (0x08) is set.
+    bytes  checksum = 10;
+
+    // Monotonically increasing per (connection, stream_id). Used by reorder buffer.
+    uint64 sequence_id  = 11;
+
+    // Logical channel within a connection (0 = default unordered).
+    uint32 stream_id    = 12;
+
+    // Channel name for STREAM_DATA packets. Empty for MESSAGE packets.
+    string channel_name = 13;
+
+    // Ed25519 signature of payload (64 bytes). Populated when FLAG_SIGNED (0x40) is set.
+    bytes  signature = 14;
+
+    // Mesh routing hop limit. Decremented at each relay node. Packet dropped when 0.
+    uint32 ttl = 15;
 }
 
-message AuthRequestPayload {
-    string password_hash    = 1;
-    map<string, string> client_info = 2;
-    string protocol_version = 3;
-}
-
-message AuthResponsePayload {
-    bool   success            = 1;
-    string session_token      = 2;
-    map<string, string> server_info = 3;
-    uint32 heartbeat_interval = 4;
-    string reason             = 5;
-}
-
-message RPCRequestPayload {
+// ─── RPC payloads ──────────────────────────────────────────────────────────────
+message RpcRequest {
     string method = 1;
     bytes  params = 2;
 }
 
-message RPCResponsePayload {
+message RpcResponse {
     bool   success = 1;
     bytes  result  = 2;
     string error   = 3;
     int32  code    = 4;
 }
 
-message MessagePayload {
-    string type = 1;
-    bytes  data = 2;
+// ─── Auth payloads ─────────────────────────────────────────────────────────────
+message AuthRequest {
+    string password_hash    = 1;
+    string protocol_version = 2;
+    map<string, string> client_info = 3;
 }
 
-message StreamDataPayload {
-    string stream    = 1;
-    string stream_id = 2;
-    bytes  data      = 3;
-    uint64 sequence  = 4;
-    uint64 timestamp = 5;
+message AuthResponse {
+    bool   success            = 1;
+    string session_token      = 2;
+    string reason             = 3;
+    uint32 heartbeat_interval = 4;
+    map<string, string> server_info = 5;
 }
 
-message FileChunkPayload {
-    string transfer_id  = 1;
-    uint32 chunk_index  = 2;
+// ─── File transfer payload ─────────────────────────────────────────────────────
+message FileChunk {
+    uint32 chunk_index  = 1;
+    uint32 total_chunks = 2;
     bytes  data         = 3;
+    string filename     = 4;
+    uint64 file_size    = 5;
 }

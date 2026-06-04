@@ -5,30 +5,71 @@ edition = "2021"
 
 [lib]
 name = "netconduit_core"
-crate-type = ["cdylib"]
+# cdylib  = needed for Python (maturin) and Flutter (frb generates its own cdylib)
+# staticlib = needed for iOS static linking
+# rlib    = needed for downstream Rust crates
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
-tokio = { version = "1.35", features = ["full"] }
-quinn = "0.11.2"
-prost = "0.13.1"
-rcgen = "0.13.1"
-rustls = { version = "0.23.5", features = ["ring", "std"] }
-anyhow = "1.0.86"
-bytes = "1.6.0"
-ring = "0.17.8"
-sled = "0.34.7"
-blake3 = "1.5.1"
-hex = "0.4.3"
-lz4_flex = { version = "0.11", features = ["frame"] }
-zstd = "0.13"
-socket2 = "0.6.4"
+# Memory allocator — 15-40% faster for allocator-heavy workloads
+mimalloc  = { version = "0.1", default-features = false }
+
+# Core networking
+tokio     = { version = "1.35", features = ["full"] }
+quinn     = "0.11.2"
+rustls    = { version = "0.23.5", features = ["aws_lc_rs", "std"] }
+anyhow    = "1.0.86"
+bytes     = "1.6.0"
+# aws-lc-rs replaces ring as the crypto backend.
+# Uses VAES + VPCLMULQDQ for AES-GCM, SHA-NI for hashing — all present on this CPU.
+aws-lc-rs = "1"
+
+# Serialisation / protocol
+prost     = "0.13.1"
+rcgen     = "0.13.1"
+
+# Compression
+lz4_flex  = { version = "0.11", features = ["frame"] }
+zstd      = { version = "0.13", features = ["zstdmt"] }
+
+# Checksums & encoding
+blake3    = "1.5.1"
+hex       = "0.4.3"
+
+# Persistence
+sled      = "0.34.7"
+
+# Networking utilities
+socket2   = "0.6.4"
+
+
+# Optional: Python bindings
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+
+# Optional: Flutter FFI bindings (flutter_rust_bridge v2)
+flutter_rust_bridge = { version = "=2.12.0", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+rustls = { version = "0.23.5", features = ["aws_lc_rs", "std"] }
 
 [build-dependencies]
 prost-build = "0.13.1"
 
 [profile.release]
-opt-level = 3
-lto = true
+opt-level     = 3
+lto           = true
 codegen-units = 1
-panic = "abort"
+panic         = "abort"
+
+# Strip symbols on release for smaller .so size on Android/iOS
+strip = true
+
+[features]
+# No default features — each consumer activates what they need:
+#   Python:  maturin passes --features python automatically
+#   Flutter: flutter_rust_bridge_codegen passes --features flutter
+#   Rust:    cargo build --features flutter  (or python)
+default  = []
+python   = ["dep:pyo3"]
+flutter  = ["dep:flutter_rust_bridge"]
