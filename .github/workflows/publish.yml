@@ -222,4 +222,4 @@ jobs:
       - name: Publish to PyPI
         run: uv publish 'all-dist/*'
         env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI-API-TOKEN }}
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
