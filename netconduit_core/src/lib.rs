@@ -393,7 +393,24 @@ fn resolve_addr(host: &str, port: u16) -> Result<SocketAddr, anyhow::Error> {
 
 #[pyfunction]
 fn stun_punch_hole(stun_server: String, local_port: u16, peer_addr: String) -> PyResult<String> {
-    let socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", local_port))?;
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{}", local_port).parse()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid address: {}", e)))?;
+    
+    let domain = if addr.is_ipv6() { socket2::Domain::IPV6 } else { socket2::Domain::IPV4 };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Socket creation failed: {}", e)))?;
+    
+    sock.set_reuse_address(true)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Set reuse address failed: {}", e)))?;
+    
+    #[cfg(not(windows))]
+    sock.set_reuse_port(true)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Set reuse port failed: {}", e)))?;
+        
+    sock.bind(&addr.into())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyOSError, _>(format!("Socket bind failed to {}: {}", addr, e)))?;
+        
+    let socket: std::net::UdpSocket = sock.into();
 
     let mut request = [0u8; 20];
     request[0..2].copy_from_slice(&0x0001u16.to_be_bytes());

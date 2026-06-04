@@ -620,6 +620,7 @@ dependencies = [
  "ring",
  "rustls",
  "sled",
+ "socket2",
  "tokio",
  "zstd",
 ]

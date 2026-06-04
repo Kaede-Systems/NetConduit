@@ -22,6 +22,7 @@ blake3 = "1.5.1"
 hex = "0.4.3"
 lz4_flex = { version = "0.11", features = ["frame"] }
 zstd = "0.13"
+socket2 = "0.6.4"
 
 [build-dependencies]
 prost-build = "0.13.1"

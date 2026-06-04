@@ -621,7 +621,7 @@ class Client:
     def _get_free_port(self) -> int:
         """Get a free port on localhost."""
         import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('127.0.0.1', 0))
             return s.getsockname()[1]
 
