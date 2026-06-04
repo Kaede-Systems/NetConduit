@@ -719,52 +719,10 @@ class Client:
             target_addr = response.get("public_addr")
             target_lan_addr = response.get("lan_addr")
             
-            # 3. Setup local punch socket port
+            # 3. Setup local punch socket port (get it early so it can be captured by the connection helpers)
             local_port = self._get_free_port()
-            stun_server = self._config.stun_server
-            
-            # 4. Perform STUN mapping on local_port (skip if local network)
-            public_addr = ""
-            is_local = self._is_loopback(self._config.server_host) or self._is_private_ip(self._config.server_host)
-            if not is_local and stun_server:
-                try:
-                    public_addr = stun_punch_hole(stun_server, local_port, "")
-                except Exception:
-                    public_addr = ""
-            if not public_addr:
-                if self._is_loopback(self._config.server_host):
-                    public_addr = f"127.0.0.1:{local_port}"
-                else:
-                    public_addr = f"{self._get_local_ip()}:{local_port}"
-                
-            # 5. Tell the target to punch towards our public address and LAN address
-            await self.send("p2p_punch_source", {
-                "request_id": request_id,
-                "source_addr": public_addr,
-                "lan_addr": f"{self._get_local_ip()}:{local_port}",
-                "target_id": target_client_id,
-            })
-            
-            # Small delay to let message route and target perform its punch
-            await asyncio.sleep(0.2)
-            
-            # 6. Perform our punch towards target's addresses
-            try:
-                target_ip = target_addr.split(":")[0]
-                is_target_local = self._is_loopback(target_ip) or self._is_private_ip(target_ip)
-                punch_stun = "" if (is_local or is_target_local) else stun_server
-                
-                logger.info(f"P2P Punching from initiator port {local_port} to {target_addr} (STUN: {punch_stun or 'None/LAN'})")
-                stun_punch_hole(punch_stun, local_port, target_addr)
-                if target_lan_addr:
-                    logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr} (STUN: {punch_stun or 'None/LAN'})")
-                    stun_punch_hole(punch_stun, local_port, target_lan_addr)
-            except Exception as e:
-                logger.warning(f"P2P Punching from initiator failed: {e}")
-                
-            await asyncio.sleep(0.1)
-            
-            # 7. Connect directly to target! Try LAN and WAN in parallel (like WebRTC ICE racing)
+
+            # 4. Connect directly to target! Try LAN and WAN in parallel (like WebRTC ICE racing)
             peer_client = None
             
             async def try_connect_lan():
@@ -816,29 +774,78 @@ class Client:
                     logger.warning(f"Failed to connect to WAN address {target_addr}: {e}")
                 return None
 
+            # Helper to run STUN and hole punching in the background (concurrent with connection attempts)
+            async def do_punching():
+                stun_server = self._config.stun_server
+                
+                # Perform STUN mapping on local_port (skip if local network)
+                public_addr = ""
+                is_local = self._is_loopback(self._config.server_host) or self._is_private_ip(self._config.server_host)
+                if not is_local and stun_server:
+                    try:
+                        public_addr = await asyncio.to_thread(stun_punch_hole, stun_server, local_port, "")
+                    except Exception:
+                        public_addr = ""
+                if not public_addr:
+                    if self._is_loopback(self._config.server_host):
+                        public_addr = f"127.0.0.1:{local_port}"
+                    else:
+                        public_addr = f"{self._get_local_ip()}:{local_port}"
+                    
+                # Tell the target to punch towards our public address and LAN address
+                await self.send("p2p_punch_source", {
+                    "request_id": request_id,
+                    "source_addr": public_addr,
+                    "lan_addr": f"{self._get_local_ip()}:{local_port}",
+                    "target_id": target_client_id,
+                })
+                
+                # Small delay to let message route and target perform its punch
+                await asyncio.sleep(0.2)
+                
+                # Perform our punch towards target's addresses
+                try:
+                    target_ip = target_addr.split(":")[0]
+                    is_target_local = self._is_loopback(target_ip) or self._is_private_ip(target_ip)
+                    punch_stun = "" if (is_local or is_target_local) else stun_server
+                    
+                    logger.info(f"P2P Punching from initiator port {local_port} to {target_addr} (STUN: {punch_stun or 'None/LAN'})")
+                    await asyncio.to_thread(stun_punch_hole, punch_stun, local_port, target_addr)
+                    if target_lan_addr:
+                        logger.info(f"P2P Punching from initiator port {local_port} to LAN {target_lan_addr} (STUN: {punch_stun or 'None/LAN'})")
+                        await asyncio.to_thread(stun_punch_hole, punch_stun, local_port, target_lan_addr)
+                except Exception as e:
+                    logger.warning(f"P2P Punching from initiator failed: {e}")
+
+            # Start punching in the background
+            punch_task = asyncio.create_task(do_punching())
+
             # Race the connection attempts concurrently
             tasks = []
             if target_lan_addr:
                 tasks.append(asyncio.create_task(try_connect_lan()))
             tasks.append(asyncio.create_task(try_connect_wan()))
             
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                res = task.result()
-                if res:
-                    peer_client = res
-                    break
-                    
-            if not peer_client and pending:
-                for task in asyncio.as_completed(pending):
-                    res = await task
+            try:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    res = task.result()
                     if res:
                         peer_client = res
                         break
                         
-            for task in pending:
-                if not task.done():
-                    task.cancel()
+                if not peer_client and pending:
+                    for task in asyncio.as_completed(pending):
+                        res = await task
+                        if res:
+                            peer_client = res
+                            break
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                if not punch_task.done():
+                    punch_task.cancel()
                     
             # 8. Fallback to E2E encrypted Mesh network if both connection attempts fail (like WebRTC TURN fallback)
             if not peer_client:
