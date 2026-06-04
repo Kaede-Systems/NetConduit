@@ -26,9 +26,21 @@ async def main():
     ))
     await broker_server.start()
     
+    import socket
+    def get_local_ip():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+
+    local_ip = get_local_ip()
+    print(f"Detected local IP: {local_ip}")
+
     print("Connecting initiator client_a to broker...")
     client_a = Client(ClientDescriptor(
-        server_host="127.0.0.1",
+        server_host=local_ip,
         server_port=broker_port,
         password="p2p_test_password",
         name="client_a",
