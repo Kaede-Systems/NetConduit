@@ -621,7 +621,6 @@ fn make_transport_config(idle_secs: u64, keepalive_secs: u64) -> Arc<quinn::Tran
     Arc::new(t)
 }
 
-const READ_CHUNK:     usize = 65536;
 const MAX_MSG_SIZE:   usize = 10 * 1024 * 1024;
 const MAX_STREAM_SIZE: usize = 100 * 1024 * 1024;
 
@@ -723,15 +722,11 @@ impl RustQUICServer {
                                             let tx  = tx_event.clone();
                                             let cid = cid.clone();
                                             tokio::spawn(async move {
-                                                let mut buf = Vec::with_capacity(4096);
-                                                loop {
-                                                    match recv.read_chunk(READ_CHUNK, true).await {
-                                                        Ok(Some(c)) => { buf.extend_from_slice(&c.bytes); if buf.len() > MAX_MSG_SIZE { return; } }
-                                                        Ok(None)    => break,
-                                                        Err(_)      => return,
+                                                if let Ok(buf) = recv.read_to_end(MAX_MSG_SIZE).await {
+                                                    if !buf.is_empty() {
+                                                        let _ = tx.send(("message".into(), cid, buf)).await;
                                                     }
                                                 }
-                                                if !buf.is_empty() { let _ = tx.send(("message".into(), cid, buf)).await; }
                                             });
                                         }
                                         Err(_) => break,
@@ -741,15 +736,11 @@ impl RustQUICServer {
                                             let tx  = tx_event.clone();
                                             let cid = cid.clone();
                                             tokio::spawn(async move {
-                                                let mut buf = Vec::with_capacity(65536);
-                                                loop {
-                                                    match recv.read_chunk(READ_CHUNK, true).await {
-                                                        Ok(Some(c)) => { buf.extend_from_slice(&c.bytes); if buf.len() > MAX_STREAM_SIZE { return; } }
-                                                        Ok(None)    => break,
-                                                        Err(_)      => return,
+                                                if let Ok(buf) = recv.read_to_end(MAX_STREAM_SIZE).await {
+                                                    if !buf.is_empty() {
+                                                        let _ = tx.send(("binary_stream".into(), cid, buf)).await;
                                                     }
                                                 }
-                                                if !buf.is_empty() { let _ = tx.send(("binary_stream".into(), cid, buf)).await; }
                                             });
                                         }
                                         Err(_) => break,
@@ -910,15 +901,11 @@ impl RustQUICClient {
                                 Ok(mut recv) => {
                                     let tx = tx_event.clone();
                                     tokio::spawn(async move {
-                                        let mut buf = Vec::with_capacity(4096);
-                                        loop {
-                                            match recv.read_chunk(READ_CHUNK, true).await {
-                                                Ok(Some(c)) => { buf.extend_from_slice(&c.bytes); if buf.len() > MAX_MSG_SIZE { return; } }
-                                                Ok(None)    => break,
-                                                Err(_)      => return,
+                                        if let Ok(buf) = recv.read_to_end(MAX_MSG_SIZE).await {
+                                            if !buf.is_empty() {
+                                                let _ = tx.send(("message".into(), "".into(), buf)).await;
                                             }
                                         }
-                                        if !buf.is_empty() { let _ = tx.send(("message".into(), "".into(), buf)).await; }
                                     });
                                 }
                                 Err(_) => break,
@@ -927,15 +914,11 @@ impl RustQUICClient {
                                 Ok((_, mut recv)) => {
                                     let tx = tx_event.clone();
                                     tokio::spawn(async move {
-                                        let mut buf = Vec::with_capacity(65536);
-                                        loop {
-                                            match recv.read_chunk(READ_CHUNK, true).await {
-                                                Ok(Some(c)) => { buf.extend_from_slice(&c.bytes); if buf.len() > MAX_STREAM_SIZE { return; } }
-                                                Ok(None)    => break,
-                                                Err(_)      => return,
+                                        if let Ok(buf) = recv.read_to_end(MAX_STREAM_SIZE).await {
+                                            if !buf.is_empty() {
+                                                let _ = tx.send(("binary_stream".into(), "".into(), buf)).await;
                                             }
                                         }
-                                        if !buf.is_empty() { let _ = tx.send(("binary_stream".into(), "".into(), buf)).await; }
                                     });
                                 }
                                 Err(_) => break,
