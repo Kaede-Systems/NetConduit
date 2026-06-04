@@ -28,10 +28,11 @@ class BenchmarkResult:
     netconduit_value: float
     websocket_value: float
     unit: str
+    lower_is_better: bool = False
     winner: str = ""
     
     def __post_init__(self):
-        if "latency" in self.metric.lower() or "time" in self.metric.lower():
+        if self.lower_is_better:
             # Lower is better
             self.winner = "netconduit" if self.netconduit_value < self.websocket_value else "websocket"
         else:
@@ -185,6 +186,7 @@ async def benchmark_connection_time(iterations: int = 100) -> BenchmarkResult:
         netconduit_value=statistics.mean(nc_times) if nc_times else 0,
         websocket_value=statistics.mean(ws_times) if ws_times else 0,
         unit="ms",
+        lower_is_better=True,
     )
 
 
@@ -229,6 +231,7 @@ async def benchmark_latency(iterations: int = 100) -> BenchmarkResult:
         netconduit_value=nc_latency,
         websocket_value=ws_latency,
         unit="ms",
+        lower_is_better=True,
     )
 
 
@@ -276,6 +279,7 @@ async def benchmark_memory(connection_count: int = 100) -> BenchmarkResult:
         netconduit_value=nc_memory,
         websocket_value=ws_memory,
         unit="KB",
+        lower_is_better=True,
     )
 
 
@@ -294,6 +298,7 @@ async def benchmark_code_complexity() -> BenchmarkResult:
         netconduit_value=nc_lines,
         websocket_value=ws_lines,
         unit="lines",
+        lower_is_better=True,
     )
 
 
